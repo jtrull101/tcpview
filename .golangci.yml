@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+  exclusions:
+    rules:
+      # Deferred Close() on a test double/fixture in test files is a very
+      # common, intentionally-ignored error in this codebase's test suite
+      # (fakes whose Close() can never meaningfully fail) - checking it
+      # everywhere would be pure noise, not a real finding.
+      - path: _test\.go
+        linters:
+          - errcheck
