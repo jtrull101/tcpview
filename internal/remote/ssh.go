@@ -1,0 +1,230 @@
+// Package remote captures traffic on a remote host over SSH by shelling out
+// to the remote's own tcpdump and decoding the piped pcap stream locally.
+// This deliberately avoids requiring a cross-compiled tcpview agent on every
+// remote box - it only needs existing SSH access and tcpdump, both already
+// near-universal on Linux hosts.
+package remote
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"os/exec"
+	"sync"
+	"time"
+
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/pcapgo"
+
+	"github.com/jtrull101/tcpview/internal/capture"
+	"github.com/jtrull101/tcpview/internal/store"
+)
+
+// Options configures an SSH-based remote capture source.
+type Options struct {
+	Host        string        // e.g. "user@host", passed straight to the ssh binary
+	Iface       string        // remote interface name to capture on
+	SSHBinary   string        // default "ssh"
+	TcpdumpPath string        // default "tcpdump"
+	Backoff     time.Duration // initial reconnect backoff, default 1s
+	MaxBackoff  time.Duration // reconnect backoff cap, default 30s
+
+	// cmdFactory overrides how the remote capture command is built.
+	// Unexported: production code always derives it from the fields above;
+	// tests substitute a fake command here to exercise reconnect/chaos
+	// scenarios without a real remote host, per the testing policy in
+	// CLAUDE.md.
+	cmdFactory func() *exec.Cmd
+}
+
+func (o Options) withDefaults() Options {
+	if o.SSHBinary == "" {
+		o.SSHBinary = "ssh"
+	}
+	if o.TcpdumpPath == "" {
+		o.TcpdumpPath = "tcpdump"
+	}
+	if o.Backoff <= 0 {
+		o.Backoff = time.Second
+	}
+	if o.MaxBackoff <= 0 {
+		o.MaxBackoff = 30 * time.Second
+	}
+	return o
+}
+
+func (o Options) buildCmd() *exec.Cmd {
+	if o.cmdFactory != nil {
+		return o.cmdFactory()
+	}
+	return exec.Command(o.SSHBinary, o.Host, o.TcpdumpPath, "-i", o.Iface, "-U", "-w", "-")
+}
+
+// SSH captures packets from a remote host by running tcpdump over an SSH
+// session and decoding the piped pcap stream. It implements capture.Source
+// and reconnects with exponential backoff if the session ends (dropped
+// connection, remote tcpdump exiting, etc) until Close is called.
+type SSH struct {
+	opts      Options
+	packets   chan store.Packet
+	errs      chan error
+	done      chan struct{}
+	closeOnce sync.Once
+	wg        sync.WaitGroup
+}
+
+var _ capture.Source = (*SSH)(nil)
+
+// New starts capturing from opts.Host/opts.Iface in the background. Callers
+// must call Close when done.
+func New(opts Options) (*SSH, error) {
+	if opts.Host == "" {
+		return nil, fmt.Errorf("remote: host required")
+	}
+	if opts.Iface == "" {
+		return nil, fmt.Errorf("remote: interface required")
+	}
+	opts = opts.withDefaults()
+
+	s := &SSH{
+		opts:    opts,
+		packets: make(chan store.Packet, 1024),
+		errs:    make(chan error, 64),
+		done:    make(chan struct{}),
+	}
+	s.wg.Add(1)
+	go s.runLoop()
+	return s, nil
+}
+
+func (s *SSH) runLoop() {
+	defer s.wg.Done()
+	defer close(s.packets)
+	defer close(s.errs)
+
+	backoff := s.opts.Backoff
+	for {
+		select {
+		case <-s.done:
+			return
+		default:
+		}
+
+		err := s.runOnce()
+
+		select {
+		case <-s.done:
+			return
+		default:
+		}
+		if err != nil {
+			select {
+			case s.errs <- fmt.Errorf("remote: session ended: %w", err):
+			default: // errs is advisory; don't block reconnect on a slow/absent reader
+			}
+		}
+
+		select {
+		case <-s.done:
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > s.opts.MaxBackoff {
+			backoff = s.opts.MaxBackoff
+		}
+	}
+}
+
+// runOnce runs a single ssh+tcpdump session to completion (clean EOF,
+// command failure, or Close) and returns the reason it ended (nil for a
+// clean EOF).
+func (s *SSH) runOnce() error {
+	cmd := s.opts.buildCmd()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+
+	// If Close() fires while we're blocked reading, kill the subprocess to
+	// unstick the read rather than hanging forever. stopWatch is closed on
+	// every exit path below so this goroutine never outlives runOnce.
+	//
+	// Deliberately NOT calling cmd.Wait() concurrently here: per os/exec's
+	// docs, Wait closes the StdoutPipe once the process exits, and calling
+	// it before all reads from that pipe have completed is a race that
+	// intermittently truncates the stream mid-read. Wait is called once,
+	// synchronously, strictly after pump() below has finished reading.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-s.done:
+			_ = cmd.Process.Kill()
+		case <-stopWatch:
+		}
+	}()
+
+	r, err := pcapgo.NewReader(bufio.NewReader(stdout))
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("pcap header: %w", err)
+	}
+
+	readErr := s.pump(r)
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return readErr
+	}
+	return waitErr
+}
+
+func (s *SSH) pump(r *pcapgo.Reader) error {
+	for {
+		select {
+		case <-s.done:
+			return nil
+		default:
+		}
+
+		data, ci, err := r.ReadPacketData()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read packet: %w", err)
+		}
+
+		raw := gopacket.NewPacket(data, r.LinkType(), gopacket.Default)
+		raw.Metadata().CaptureInfo = ci
+
+		p, decErr := capture.Decode(raw, s.opts.Iface)
+		if decErr != nil {
+			select {
+			case s.errs <- decErr:
+			default:
+			}
+			continue
+		}
+		select {
+		case s.packets <- p:
+		case <-s.done:
+			return nil
+		}
+	}
+}
+
+func (s *SSH) Packets() <-chan store.Packet { return s.packets }
+func (s *SSH) Errors() <-chan error         { return s.errs }
+
+func (s *SSH) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+	s.wg.Wait()
+	return nil
+}

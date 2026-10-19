@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Install libpcap
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: gofmt check
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: Test (race + coverage)
+        run: go test ./... -race -covermode=atomic -coverprofile=coverage.out
+
+      - name: Coverage gate (aggregate >= 90%)
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "Aggregate line coverage: ${total}%"
+          echo "### Coverage: ${total}%" >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -func=coverage.out | tail -20 >> "$GITHUB_STEP_SUMMARY"
+          awk -v c="$total" 'BEGIN { exit (c + 0 >= 90) ? 0 : 1 }' \
+            || { echo "Aggregate coverage ${total}% is below the 90% gate"; exit 1; }
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+      - name: Fuzz smoke tests
+        run: |
+          set -e
+          go test ./internal/filter/... -run=^$ -fuzz=FuzzParseExpression -fuzztime=10s
+          go test ./internal/filter/... -run=^$ -fuzz=FuzzFilterMatches -fuzztime=10s
+          go test ./internal/capture/... -run=^$ -fuzz=FuzzDecode -fuzztime=10s
+          go test ./internal/store/... -run=^$ -fuzz=FuzzReadArchiveFile -fuzztime=10s
+          go test . -run=^$ -fuzz=FuzzParseCapEff -fuzztime=10s
