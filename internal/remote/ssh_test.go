@@ -1,10 +1,13 @@
 package remote
 
 import (
+	"io"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,6 +139,39 @@ func TestSSH_MissingIfaceErrors(t *testing.T) {
 	_, err := New(Options{Host: "fake-host"})
 	if err == nil {
 		t.Fatal("New() with empty Iface returned no error")
+	}
+}
+
+func TestSSH_CommandFailureIncludesRemoteStderr(t *testing.T) {
+	t.Parallel()
+	// Mirrors a real "remote tcpdump lacks CAP_NET_RAW" failure: the
+	// process exits having written a diagnostic to stderr but produced no
+	// pcap data at all. Found via a real end-to-end test against an
+	// actual (locally-permission-denied) SSH target: the error reported
+	// used to be an opaque "pcap header: EOF" with the actual reason
+	// silently discarded.
+	s, err := New(Options{
+		Host: "fake-host", Iface: "eth0",
+		cmdFactory: func() *exec.Cmd {
+			return exec.Command("sh", "-c", "echo 'tcpdump: eth0: permission denied' 1>&2; exit 1")
+		},
+		Backoff: time.Hour, MaxBackoff: time.Hour, // only need the first attempt
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer s.Close()
+
+	select {
+	case e, ok := <-s.Errors():
+		if !ok {
+			t.Fatal("Errors() channel closed before reporting a failure")
+		}
+		if !strings.Contains(e.Error(), "permission denied") {
+			t.Fatalf("error %q does not include the remote command's stderr", e.Error())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for a reported error from a failing command")
 	}
 }
 
@@ -272,5 +308,102 @@ func TestSSH_Chaos_ReconnectsAfterMidStreamDrop(t *testing.T) {
 	got := collectPackets(t, s, 10, 10*time.Second)
 	if got < 10 {
 		t.Fatalf("collected %d packets across reconnect, want at least 10", got)
+	}
+}
+
+// --- boundedBuffer ---
+
+func TestBoundedBuffer_WritesUnderCapAreKept(t *testing.T) {
+	t.Parallel()
+	b := &boundedBuffer{maxLen: 100}
+	n, err := b.Write([]byte("hello"))
+	if err != nil || n != 5 {
+		t.Fatalf("Write() = (%d, %v), want (5, nil)", n, err)
+	}
+	if b.String() != "hello" {
+		t.Fatalf("String() = %q, want %q", b.String(), "hello")
+	}
+}
+
+func TestBoundedBuffer_WritesOverCapAreTruncatedNotErrored(t *testing.T) {
+	t.Parallel()
+	b := &boundedBuffer{maxLen: 5}
+	n, err := b.Write([]byte("hello world"))
+	if err != nil {
+		t.Fatalf("Write() error: %v, want nil (never errors, even when truncating)", err)
+	}
+	if n != len("hello world") {
+		t.Fatalf("Write() n = %d, want %d (reports full length even though truncated internally)", n, len("hello world"))
+	}
+	if b.String() != "hello" {
+		t.Fatalf("String() = %q, want truncated to %q", b.String(), "hello")
+	}
+}
+
+func TestBoundedBuffer_MultipleWritesStopAtCap(t *testing.T) {
+	t.Parallel()
+	b := &boundedBuffer{maxLen: 10}
+	for i := 0; i < 5; i++ {
+		if _, err := b.Write([]byte("abcde")); err != nil {
+			t.Fatalf("Write() error: %v", err)
+		}
+	}
+	if len(b.String()) > 10 {
+		t.Fatalf("String() length = %d, want capped at 10", len(b.String()))
+	}
+}
+
+func TestBoundedBuffer_EmptyBufferStringIsEmpty(t *testing.T) {
+	t.Parallel()
+	b := &boundedBuffer{maxLen: 100}
+	if b.String() != "" {
+		t.Fatalf("String() = %q, want empty for a never-written buffer", b.String())
+	}
+}
+
+func TestBoundedBuffer_TrimsWhitespace(t *testing.T) {
+	t.Parallel()
+	b := &boundedBuffer{maxLen: 100}
+	_, _ = b.Write([]byte("  padded with whitespace  \n"))
+	if b.String() != "padded with whitespace" {
+		t.Fatalf("String() = %q, want trimmed", b.String())
+	}
+}
+
+func TestWithStderr_NilErrorStaysNil(t *testing.T) {
+	t.Parallel()
+	b := &boundedBuffer{maxLen: 100}
+	_, _ = b.Write([]byte("some stderr output"))
+	if err := withStderr(nil, b); err != nil {
+		t.Fatalf("withStderr(nil, ...) = %v, want nil", err)
+	}
+}
+
+func TestWithStderr_EmptyStderrLeavesErrorUnchanged(t *testing.T) {
+	t.Parallel()
+	b := &boundedBuffer{maxLen: 100}
+	base := io.EOF
+	got := withStderr(base, b)
+	if got != base {
+		t.Fatalf("withStderr with empty stderr = %v, want the original error unchanged", got)
+	}
+}
+
+func TestWithStderr_ChaosRandomBytesNeverPanic(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewSource(11))
+	for i := 0; i < 200; i++ {
+		b := &boundedBuffer{maxLen: 1 + rng.Intn(50)}
+		data := make([]byte, rng.Intn(200))
+		rng.Read(data)
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Fatalf("panicked at i=%d: %v", i, rec)
+				}
+			}()
+			_, _ = b.Write(data)
+			_ = withStderr(io.EOF, b)
+		}()
 	}
 }

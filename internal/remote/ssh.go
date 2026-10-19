@@ -7,9 +7,11 @@ package remote
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +21,37 @@ import (
 	"github.com/jtrull101/tcpview/internal/capture"
 	"github.com/jtrull101/tcpview/internal/store"
 )
+
+// maxStderrCapture bounds how much of the remote command's stderr gets kept
+// for error messages - plenty for a diagnostic like "permission denied" or
+// "command not found", not enough for a chatty/hostile remote to grow
+// unbounded memory over a long-lived reconnect loop.
+const maxStderrCapture = 4096
+
+// boundedBuffer is an io.Writer that keeps only the first maxLen bytes
+// written to it, silently discarding the rest - used to capture just
+// enough of a subprocess's stderr for a useful error message, without
+// letting a long-running or chatty remote process grow it unbounded.
+type boundedBuffer struct {
+	buf    bytes.Buffer
+	maxLen int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	remaining := b.maxLen - b.buf.Len()
+	if remaining > 0 {
+		if len(p) < remaining {
+			b.buf.Write(p)
+		} else {
+			b.buf.Write(p[:remaining])
+		}
+	}
+	return len(p), nil // report success regardless, so the pipe never backs up
+}
+
+func (b *boundedBuffer) String() string {
+	return strings.TrimSpace(b.buf.String())
+}
 
 // Options configures an SSH-based remote capture source.
 type Options struct {
@@ -145,6 +178,8 @@ func (s *SSH) runOnce() error {
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
+	stderr := &boundedBuffer{maxLen: maxStderrCapture}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
@@ -172,15 +207,29 @@ func (s *SSH) runOnce() error {
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return fmt.Errorf("pcap header: %w", err)
+		return withStderr(fmt.Errorf("pcap header: %w", err), stderr)
 	}
 
 	readErr := s.pump(r)
 	waitErr := cmd.Wait()
 	if readErr != nil {
-		return readErr
+		return withStderr(readErr, stderr)
 	}
-	return waitErr
+	return withStderr(waitErr, stderr)
+}
+
+// withStderr appends the remote command's captured stderr to err, if both
+// are non-empty - the raw error (an EOF, an exit status) rarely says why a
+// remote capture actually failed; the remote tcpdump/ssh's own stderr
+// (permission denied, no such device, host key rejected, etc) usually does.
+func withStderr(err error, stderr *boundedBuffer) error {
+	if err == nil {
+		return nil
+	}
+	if msg := stderr.String(); msg != "" {
+		return fmt.Errorf("%w (remote stderr: %s)", err, msg)
+	}
+	return err
 }
 
 func (s *SSH) pump(r *pcapgo.Reader) error {
