@@ -15,9 +15,13 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 
 ## Installing a release binary
 
-Prebuilt binaries for linux/amd64, darwin/amd64, and darwin/arm64 are attached to each [release](https://github.com/jtrull101/tcpview/releases).
+```sh
+curl -sSL https://raw.githubusercontent.com/jtrull101/tcpview/main/install.sh | sh
+```
 
-**Linux note**: the released binary is built on GitHub's `ubuntu-latest` runner, which links against the legacy `libpcap.so.0.8` soname. Distros that only ship the modern `libpcap.so.1` (e.g. current Arch) will fail to launch it with a `cannot open shared object file` error. Either symlink your way around it:
+Detects your OS/arch, downloads the matching asset from the [latest release](https://github.com/jtrull101/tcpview/releases), and installs it to `~/.local/bin/tcpview` (override with `INSTALL_DIR=/somewhere sh install.sh`; pin a version with `VERSION=v0.1.0 sh install.sh`). Prebuilt binaries cover linux/amd64, darwin/amd64, and darwin/arm64.
+
+**Linux note**: the released binary is built on GitHub's `ubuntu-latest` runner, which links against the legacy `libpcap.so.0.8` soname. Distros that only ship the modern `libpcap.so.1` (e.g. current Arch) will fail to launch it with a `cannot open shared object file` error - the install script detects this and prints the exact fix:
 
 ```sh
 sudo ln -s /usr/lib/libpcap.so.1 /usr/lib/libpcap.so.0.8
