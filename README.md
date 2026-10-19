@@ -13,6 +13,18 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 - **Export to pcap** - press `e` to write whatever's currently shown (post-filter) to a real pcap file, openable in tcpdump/Wireshark/etc.
 - **Help** - press `?` for a full keybinding reference at any time.
 
+## Installing a release binary
+
+Prebuilt binaries for linux/amd64, darwin/amd64, and darwin/arm64 are attached to each [release](https://github.com/jtrull101/tcpview/releases).
+
+**Linux note**: the released binary is built on GitHub's `ubuntu-latest` runner, which links against the legacy `libpcap.so.0.8` soname. Distros that only ship the modern `libpcap.so.1` (e.g. current Arch) will fail to launch it with a `cannot open shared object file` error. Either symlink your way around it:
+
+```sh
+sudo ln -s /usr/lib/libpcap.so.1 /usr/lib/libpcap.so.0.8
+```
+
+or just build from source (below), which always matches whatever libpcap your system actually has.
+
 ## Building
 
 ```sh
