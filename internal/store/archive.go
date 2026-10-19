@@ -25,11 +25,25 @@ func (o ArchiveOptions) withDefaults() ArchiveOptions {
 	if o.MaxFileAge <= 0 {
 		o.MaxFileAge = 5 * time.Minute
 	}
-	if o.MaxFileBytes <= 0 {
-		o.MaxFileBytes = 32 << 20 // 32 MiB
-	}
 	if o.MaxTotalBytes <= 0 {
 		o.MaxTotalBytes = 1 << 30 // 1 GiB
+	}
+	if o.MaxFileBytes <= 0 {
+		o.MaxFileBytes = 32 << 20 // 32 MiB
+		// The currently-open file is exempt from the total-size cap (see
+		// enforceTotalCapLocked) - it can grow up to MaxFileBytes before
+		// rotation ever gives eviction a second file to work with. Found
+		// via a real sustained-load test: a small configured cap (e.g. 20
+		// MiB) combined with the 32 MiB *default* file size meant the
+		// archive visibly sat at ~1.5x the configured cap for the entire
+		// time it took to fill that first file. Only clamp the default,
+		// not an explicitly-chosen MaxFileBytes (see
+		// TestArchive_Stress_CurrentFileNeverDeletedMidWrite, which
+		// deliberately sets a huge MaxFileBytes to test the exemption
+		// itself and would break if this silently capped it too).
+		if o.MaxFileBytes > o.MaxTotalBytes {
+			o.MaxFileBytes = o.MaxTotalBytes
+		}
 	}
 	return o
 }

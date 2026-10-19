@@ -92,6 +92,73 @@ func TestArchive_RotatesOnFileAge(t *testing.T) {
 	}
 }
 
+// --- default-file-size-vs-total-cap clamping (see withDefaults) ---
+//
+// Found via a real sustained-load test: setting a total cap smaller than
+// the 32 MiB *default* per-file size let a single file balloon well past
+// the configured cap before the first rotation ever happened, since the
+// in-flight file is exempt from eviction. Only the default should clamp -
+// an explicitly-chosen MaxFileBytes (however large) must be left alone,
+// since TestArchive_Stress_CurrentFileNeverDeletedMidWrite deliberately
+// relies on that to test the exemption itself.
+
+func TestArchiveOptions_DefaultFileSizeClampsToSmallTotalCap(t *testing.T) {
+	t.Parallel()
+	got := ArchiveOptions{MaxTotalBytes: 1024}.withDefaults()
+	if got.MaxFileBytes != 1024 {
+		t.Fatalf("MaxFileBytes = %d, want clamped to MaxTotalBytes (1024)", got.MaxFileBytes)
+	}
+}
+
+func TestArchiveOptions_ExplicitFileSizeIsNeverClamped(t *testing.T) {
+	t.Parallel()
+	got := ArchiveOptions{MaxFileBytes: 1 << 30, MaxTotalBytes: 1}.withDefaults()
+	if got.MaxFileBytes != 1<<30 {
+		t.Fatalf("MaxFileBytes = %d, want the explicit 1GiB value left untouched", got.MaxFileBytes)
+	}
+}
+
+func TestArchiveOptions_DefaultFileSizeUnchangedWhenCapIsLarge(t *testing.T) {
+	t.Parallel()
+	got := ArchiveOptions{MaxTotalBytes: 10 << 30}.withDefaults() // 10 GiB cap, way above the 32 MiB default
+	if got.MaxFileBytes != 32<<20 {
+		t.Fatalf("MaxFileBytes = %d, want the unclamped 32 MiB default", got.MaxFileBytes)
+	}
+}
+
+func TestArchive_Stress_SmallCapNeverOvershootsBeyondOneFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const capBytes = 50 * 1024 // 50 KiB total cap, well under the 32 MiB default file size
+	a, err := NewArchive(ArchiveOptions{Dir: dir, MaxTotalBytes: capBytes})
+	if err != nil {
+		t.Fatalf("NewArchive error: %v", err)
+	}
+	defer a.Close()
+
+	base := time.Now()
+	payload := make([]byte, 500)
+	for i := 0; i < 2000; i++ {
+		p := archivePacket(base.Add(time.Duration(i)*time.Millisecond), "x")
+		p.Raw = payload
+		if err := a.Write(p); err != nil {
+			t.Fatalf("Write %d error: %v", i, err)
+		}
+	}
+
+	total, err := a.TotalBytes()
+	if err != nil {
+		t.Fatalf("TotalBytes error: %v", err)
+	}
+	// With the default file size now clamped to the cap itself, total
+	// on-disk size should track close to the cap (plus one record's worth
+	// of slack for whatever was mid-write when the cap was last checked),
+	// not balloon toward the old unclamped 32 MiB default.
+	if total > capBytes+4096 {
+		t.Fatalf("TotalBytes() = %d, want close to the %d-byte cap (old bug: could reach the unclamped default file size)", total, capBytes)
+	}
+}
+
 func TestArchive_RotatesOnFileSize(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
