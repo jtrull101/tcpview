@@ -44,7 +44,11 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pinned explicitly: "latest" has been observed resolving to a
+          # release old enough to reject this module's go.mod "go"
+          # directive outright ("Go language version used to build
+          # golangci-lint is lower than the targeted Go version").
+          version: v2.12.2
 
       - name: Test (race + coverage)
         run: go test ./... -race -covermode=atomic -coverprofile=coverage.out
