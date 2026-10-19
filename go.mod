@@ -1,6 +1,6 @@
 module github.com/jtrull101/tcpview
 
-go 1.26.5
+go 1.26
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0

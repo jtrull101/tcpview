@@ -2,6 +2,8 @@
 
 A terminal UI network traffic analyzer. No more remembering interface names, ports, or `tcpdump` filter syntax up front: pick an interface (or a remote host over SSH) from a list, watch decoded traffic live, filter it interactively, and rewind to see what already passed.
 
+![tcpview live-tailing loopback traffic, filtered to proto=icmp](docs/screenshot.png)
+
 ## Features
 
 - **Live capture** on a local interface via libpcap, or on a **remote host over SSH** (`ssh <host> tcpdump -i <iface> -U -w -`, piped and decoded locally - no agent to install on the remote box, just SSH access and `tcpdump`).
@@ -15,9 +17,28 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 
 ```sh
 go build -o tcpview .
+# or: make build
 ```
 
 Requires Go and `libpcap` (already installed on most Linux systems; `sudo pacman -S libpcap` on Arch).
+
+A `Makefile` wraps the common dev commands:
+
+```sh
+make build         # go build -> ./tcpview
+make run           # build + run (needs CAP_NET_RAW; see `make setcap`)
+make setcap        # grant the built binary CAP_NET_RAW/CAP_NET_ADMIN once, so sudo isn't needed per-run
+make test          # go test ./...
+make test-race     # go test ./... -race
+make cover         # race + coverage, prints the per-function/aggregate summary
+make cover-check   # same, but fails if aggregate coverage drops below 90%
+make fuzz          # short fuzz smoke pass across every Fuzz target (FUZZTIME=10s by default)
+make fmt           # gofmt -w .
+make lint          # golangci-lint run ./...
+make check         # everything CI runs: fmt-check, vet, lint, race tests, coverage gate
+make clean         # remove build/coverage artifacts
+make help          # list all targets
+```
 
 ## Running
 
@@ -86,5 +107,12 @@ Precedence: an explicitly-passed CLI flag always wins over the config file, whic
 See `CLAUDE.md` for the testing policy (every package needs positive/negative/load/stress/chaos tests, >90% aggregate coverage) and architecture notes (why the archive isn't literal pcap format, why remote capture shells out to the remote's own `tcpdump` instead of needing an agent, etc).
 
 ```sh
-go test ./... -race -cover
+make check   # fmt-check, vet, golangci-lint, race-enabled tests, 90% coverage gate - everything CI runs
 ```
+
+Every parser-like function (filter expressions, packet decoding, archive file parsing, the `/proc/self/status` capability parser) also has a native Go fuzz test (`make fuzz` for a quick local smoke pass); CI runs a short fuzz pass on every push, and the project has been fuzzed for 5M+ executions locally with zero crashes found.
+
+### CI / releases
+
+- `.github/workflows/ci.yml` runs on every push/PR: build, `gofmt` check, `go vet`, `golangci-lint`, race-enabled tests, a 90%-aggregate-coverage gate, and a fuzz smoke pass.
+- `.github/workflows/release.yml` runs on any `vX.Y.Z` tag push: builds native binaries for linux/amd64, darwin/amd64, and darwin/arm64, and publishes them as a GitHub Release.
