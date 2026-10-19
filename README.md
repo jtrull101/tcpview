@@ -13,6 +13,44 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 - **Export to pcap** - press `e` to write whatever's currently shown (post-filter) to a real pcap file, openable in tcpdump/Wireshark/etc.
 - **Help** - press `?` for a full keybinding reference at any time.
 
+## A tour, in screenshots
+
+Everything below is a real screenshot of real traffic captured on an actual machine while writing this - nothing staged or mocked.
+
+### No `tcpdump -D` required
+
+Launching with no arguments lists every capturable interface by name and description - including the real-but-easy-to-forget ones like `any` (capture on everything at once) alongside physical NICs, bridges, and `nflog`/`nfqueue`. Pick one with `↑`/`↓` + `enter`; no prior knowledge of interface names needed.
+
+![Interface picker listing real local interfaces](docs/screenshot-picker.png)
+
+### Filtering is live, not a restart
+
+Press `/` and type an expression - `iface`, `src`, `dst`, `sport`, `dport`, `proto` - while packets keep flowing in the background underneath it:
+
+![Typing a filter expression while traffic keeps streaming](docs/screenshot-filter-edit.png)
+
+Hit `enter` and the view narrows instantly against the *existing* buffer - no re-capture, no dropped history. Here it's narrowed a noisy multi-protocol capture down to exactly the real HTTPS flows on port 443:
+
+![1000 buffered packets narrowed down to 235 real HTTPS flows on dport=443](docs/screenshot-filter-applied.png)
+
+### Rewind: the actually novel part
+
+This is the feature a plain `tcpdump`/Wireshark live-capture session can't give you: scrub backward in time with `←`/`→` to see traffic that already scrolled off-screen, without having had to pre-emptively start a recording. Recent history comes from an in-memory ring; anything older is transparently pulled from a bounded on-disk archive that rotates and prunes itself (see [Rewind archive flags](#rewind-archive-flags) below) - the UI doesn't care which, it just shows you what was happening at that point in time, filters and all:
+
+![REWOUND to a point 25 seconds in the past, showing real historical traffic](docs/screenshot-rewind.png)
+
+### Packet detail, down to the bytes
+
+`enter` on any row in the live or rewound view opens a full breakdown plus a classic hex+ASCII dump of the actual captured frame - no separate tool needed to go one level deeper than the summary table:
+
+![Packet detail view with a real hex dump of a captured TCP/TLS frame](docs/screenshot-detail.png)
+
+### Full keybinding reference, always one keypress away
+
+`?` from anywhere in the live view:
+
+![Full keybinding help screen](docs/screenshot-help.png)
+
 ## Installing a release binary
 
 ```sh
