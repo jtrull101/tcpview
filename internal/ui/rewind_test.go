@@ -440,3 +440,96 @@ func TestModel_ExtremeResize_WhileRewound(t *testing.T) {
 	m.timeline = timelineState{active: true, at: time.Now()}
 	resizeThroughAllSizes(t, m)
 }
+
+// --- rewind boundary conditions ---
+//
+// Mirrors a real live session: rewound 120 steps (20 minutes) before any
+// capture had even started, combined a zero-match filter with an active
+// rewind over a window that *does* have real data, and spammed 60 rapid
+// alternating left/right presses - all against a running instance via
+// tmux, all survived cleanly. These pin down the same scenarios as fast
+// automated checks.
+
+func TestModel_RewindFarBeforeAnyDataIsEmptyNotError(t *testing.T) {
+	t.Parallel()
+	m, _ := newArchivedModel(t)
+	mUpdated, _ := m.Update(packetMsg(samplePacket(1)))
+	m = mUpdated.(Model)
+
+	// 120 steps back (20 minutes) - well before this model (or its archive)
+	// ever had any data at all.
+	for i := 0; i < 120; i++ {
+		mUpdated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		m = mUpdated.(Model)
+	}
+	if !m.timeline.active {
+		t.Fatal("timeline.active = false after stepping back")
+	}
+
+	pkts := m.packetsForDisplay()
+	if len(pkts) != 0 {
+		t.Fatalf("packetsForDisplay() = %d packets, want 0 for a window far before any data existed", len(pkts))
+	}
+	// The real point of this test: it must not panic or hang getting here.
+	_ = m.View()
+}
+
+func TestModel_RewindWithZeroMatchFilterOverRealData(t *testing.T) {
+	t.Parallel()
+	m, _ := newArchivedModel(t)
+
+	base := time.Now()
+	for i := 0; i < 20; i++ {
+		p := samplePacket(i)
+		p.Time = base.Add(time.Duration(i) * time.Second)
+		mUpdated, _ := m.Update(packetMsg(p))
+		m = mUpdated.(Model)
+	}
+
+	// Filter on a port nothing matches, then rewind into the exact window
+	// that DOES have real (but now filtered-out) data.
+	mUpdated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = mUpdated.(Model)
+	for _, r := range "dport=9999" {
+		mUpdated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = mUpdated.(Model)
+	}
+	mUpdated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mUpdated.(Model)
+	if m.filterBar.editing {
+		t.Fatal("still editing after applying the filter")
+	}
+
+	m.timeline = timelineState{active: true, at: base.Add(10 * time.Second)}
+	m.refreshRows()
+
+	if len(m.table.Rows()) != 0 {
+		t.Fatalf("table has %d rows, want 0 (real data present, but none matches dport=9999)", len(m.table.Rows()))
+	}
+}
+
+func TestModel_Stress_RapidAlternatingScrubAgainstRealData(t *testing.T) {
+	t.Parallel()
+	m, _ := newArchivedModel(t)
+	for i := 0; i < 30; i++ {
+		mUpdated, _ := m.Update(packetMsg(samplePacket(i)))
+		m = mUpdated.(Model)
+	}
+
+	for i := 0; i < 60; i++ {
+		key := tea.KeyLeft
+		if i%2 == 0 {
+			key = tea.KeyRight
+		}
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Fatalf("Update panicked at i=%d: %v", i, rec)
+				}
+			}()
+			mUpdated, _ := m.Update(tea.KeyMsg{Type: key})
+			m = mUpdated.(Model)
+			_ = m.View()
+		}()
+	}
+}
