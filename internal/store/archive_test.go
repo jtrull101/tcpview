@@ -306,6 +306,47 @@ func TestReadArchiveFile_MissingFileErrors(t *testing.T) {
 	}
 }
 
+// TestArchive_SurvivesAbruptTerminationWithoutClose models what actually
+// happens on SIGTERM/SIGKILL: Close() (and all other deferred cleanup)
+// never runs at all. Each Write already flushes synchronously, so the
+// on-disk bytes after a real signal kill are indistinguishable from the
+// on-disk bytes right here, before ever calling Close - this is a faithful,
+// repeatable proxy for abrupt termination without needing to actually
+// fork/signal/kill a real process from within a test.
+//
+// Verified for real too: sent SIGTERM and SIGKILL to an actual running
+// tcpview process mid-capture and checked the resulting archive file by
+// hand - every line parsed as valid JSON both times, matching what this
+// test asserts.
+func TestArchive_SurvivesAbruptTerminationWithoutClose(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a, err := NewArchive(ArchiveOptions{Dir: dir})
+	if err != nil {
+		t.Fatalf("NewArchive error: %v", err)
+	}
+
+	base := time.Now()
+	const n = 500
+	for i := 0; i < n; i++ {
+		if err := a.Write(archivePacket(base.Add(time.Duration(i)*time.Millisecond), "x")); err != nil {
+			t.Fatalf("Write %d error: %v", i, err)
+		}
+	}
+	// Deliberately no a.Close() here - that's the point of this test.
+
+	r := NewArchiveReader(dir)
+	got, err := r.Range(base.Add(-time.Minute), base.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Range error on an archive that was never cleanly closed: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("read back %d packets, want all %d despite no clean Close", len(got), n)
+	}
+
+	_ = a.Close() // tidy up the test's own fd; irrelevant to the assertion above
+}
+
 func TestArchive_Close_NoWritesIsNoop(t *testing.T) {
 	t.Parallel()
 	a, err := NewArchive(ArchiveOptions{Dir: t.TempDir()})
