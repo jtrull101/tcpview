@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jtrull101/tcpview/internal/capture"
 	"github.com/jtrull101/tcpview/internal/store"
 )
 
@@ -342,4 +343,100 @@ func TestModel_ExportErrorIsSurfacedOnErrField(t *testing.T) {
 	if m.err == nil {
 		t.Fatal("err is nil after exporting to a nonexistent directory")
 	}
+}
+
+// --- extreme resize across every screen state ---
+//
+// Mirrors manual testing via a real tmux session resized down to 1x1 (and
+// various other extremes) while live-tailing, mid-filter-edit, viewing
+// packet detail, viewing help, and on the interface picker - all survived
+// without a crash. These tests pin that down as an automated regression
+// check, including dimensions a real terminal couldn't even produce
+// (negative, exactly zero) for extra margin.
+
+func extremeSizes() []tea.WindowSizeMsg {
+	return []tea.WindowSizeMsg{
+		{Width: 0, Height: 0},
+		{Width: 1, Height: 1},
+		{Width: -5, Height: -5},
+		{Width: 300, Height: 1},
+		{Width: 1, Height: 300},
+		{Width: 150, Height: 24}, // back to a sane size
+	}
+}
+
+func resizeThroughAllSizes(t *testing.T, m Model) Model {
+	t.Helper()
+	for _, sz := range extremeSizes() {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Fatalf("Update(%+v) panicked: %v", sz, rec)
+				}
+			}()
+			mUpdated, _ := m.Update(sz)
+			m = mUpdated.(Model)
+			_ = m.View()
+		}()
+	}
+	return m
+}
+
+func TestModel_ExtremeResize_OnInterfacePicker(t *testing.T) {
+	t.Parallel()
+	m := NewModel([]capture.Interface{{Name: "eth0"}, {Name: "lo"}}, nil)
+	resizeThroughAllSizes(t, m)
+}
+
+func TestModel_ExtremeResize_OnLiveTail(t *testing.T) {
+	t.Parallel()
+	fs := newFakeSource()
+	m := NewModelWithSource("eth0", fs)
+	mUpdated, _ := m.Update(packetMsg(samplePacket(1)))
+	m = mUpdated.(Model)
+	mUpdated, _ = m.Update(tickMsg(time.Now()))
+	m = mUpdated.(Model)
+	resizeThroughAllSizes(t, m)
+}
+
+func TestModel_ExtremeResize_WhileEditingFilter(t *testing.T) {
+	t.Parallel()
+	fs := newFakeSource()
+	m := NewModelWithSource("eth0", fs)
+	mUpdated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = mUpdated.(Model)
+	mUpdated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m = mUpdated.(Model)
+	if !m.filterBar.editing {
+		t.Fatal("setup failed: not in filter-editing mode")
+	}
+	resizeThroughAllSizes(t, m)
+}
+
+func TestModel_ExtremeResize_OnPacketDetail(t *testing.T) {
+	t.Parallel()
+	fs := newFakeSource()
+	m := NewModelWithSource("eth0", fs)
+	m.state = viewDetail
+	m.selected = samplePacket(1)
+	resizeThroughAllSizes(t, m)
+}
+
+func TestModel_ExtremeResize_OnHelpScreen(t *testing.T) {
+	t.Parallel()
+	fs := newFakeSource()
+	m := NewModelWithSource("eth0", fs)
+	m.state = viewHelp
+	resizeThroughAllSizes(t, m)
+}
+
+func TestModel_ExtremeResize_WhileRewound(t *testing.T) {
+	t.Parallel()
+	m, _ := newArchivedModel(t)
+	for i := 0; i < 20; i++ {
+		mUpdated, _ := m.Update(packetMsg(samplePacket(i)))
+		m = mUpdated.(Model)
+	}
+	m.timeline = timelineState{active: true, at: time.Now()}
+	resizeThroughAllSizes(t, m)
 }
