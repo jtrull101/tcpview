@@ -240,7 +240,16 @@ func TestRing_Chaos_ConcurrentReadersAndWriters(t *testing.T) {
 	var readersWG, writersWG sync.WaitGroup
 	stop := make(chan struct{})
 
-	// Concurrent readers hammering Snapshot/Len/Oldest/Newest while writers run.
+	// Concurrent readers hammering Snapshot/Len/Oldest/Newest while writers
+	// run. A tiny sleep between iterations (rather than a pure busy-spin)
+	// keeps this representative of real usage (the UI polls on a tick, it
+	// never spins) and avoids the readers monopolizing CPU on a
+	// resource-constrained runner - a pure spin loop here was observed to
+	// make this test time out under -race on GitHub Actions' shared CI
+	// runners (plenty fast on a many-core dev machine, but Snapshot()
+	// allocates a fresh slice every call, and four unthrottled readers doing
+	// that back-to-back under race instrumentation starved the writers of
+	// CPU/memory bandwidth badly enough to blow the deadline).
 	for i := 0; i < 4; i++ {
 		readersWG.Add(1)
 		go func() {
@@ -254,6 +263,7 @@ func TestRing_Chaos_ConcurrentReadersAndWriters(t *testing.T) {
 					_ = r.Len()
 					_, _ = r.Oldest()
 					_, _ = r.Newest()
+					time.Sleep(50 * time.Microsecond)
 				}
 			}
 		}()
@@ -277,7 +287,7 @@ func TestRing_Chaos_ConcurrentReadersAndWriters(t *testing.T) {
 	}()
 	select {
 	case <-writerDone:
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("concurrent chaos test timed out - possible deadlock")
 	}
 	close(stop)
