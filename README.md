@@ -2,6 +2,25 @@
 
 A terminal UI network traffic analyzer. No more remembering interface names, ports, or `tcpdump` filter syntax up front: pick an interface (or a remote host over SSH) from a list, watch decoded traffic live, filter it interactively, and rewind to see what already passed.
 
+## Contents
+
+- [Features](#features)
+- [A tour, in screenshots](#a-tour-in-screenshots)
+  - [No `tcpdump -D` required](#no-tcpdump--d-required)
+  - [Filtering is live, not a restart](#filtering-is-live-not-a-restart)
+  - [Rewind: the actually novel part](#rewind-the-actually-novel-part)
+  - [Packet detail, down to the bytes](#packet-detail-down-to-the-bytes)
+  - [Full keybinding reference, always one keypress away](#full-keybinding-reference-always-one-keypress-away)
+- [Installing a release binary](#installing-a-release-binary)
+- [Building](#building)
+- [Running](#running)
+  - [Remote capture](#remote-capture)
+  - [Keybindings](#keybindings)
+  - [Rewind archive flags](#rewind-archive-flags)
+  - [Config file](#config-file)
+- [Development](#development)
+  - [CI / releases](#ci--releases)
+
 ![tcpview live-tailing loopback traffic, filtered to proto=icmp](docs/screenshot.png)
 
 ## Features
