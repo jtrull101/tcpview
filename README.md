@@ -26,6 +26,7 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 ## Features
 
 - **Live capture** on a local interface via libpcap, or on a **remote host over SSH** (`ssh <host> tcpdump -i <iface> -U -w -`, piped and decoded locally - no agent to install on the remote box, just SSH access and `tcpdump`).
+- **Live interface switching** - press `tab` / `shift+tab` mid-capture to cycle through local interfaces without restarting.
 - **Interactive filtering** - press `/` and type a simple expression like `proto=tcp dport=443 src=10.0.0.0/24`, applied live against whatever's currently buffered.
 - **Rewind** - press `←` to scrub backward through traffic that already scrolled off, `→` to scrub forward, `L` to jump back to live. Recent traffic is served from an in-memory ring; anything older comes from a bounded on-disk archive (see below).
 - **Packet detail** - press `enter` on any row for a parsed field breakdown plus a hex+ASCII dump of the raw frame.
@@ -39,6 +40,8 @@ Everything below is a real screenshot of real traffic captured on an actual mach
 ### No `tcpdump -D` required
 
 Launching with no arguments lists every capturable interface by name and description - including the real-but-easy-to-forget ones like `any` (capture on everything at once) alongside physical NICs, bridges, and `nflog`/`nfqueue`. Pick one with `↑`/`↓` + `enter`; no prior knowledge of interface names needed.
+
+That first pick isn't final: once capturing, `tab` / `shift+tab` moves capture to the next / previous interface in the same list (wrapping at either end), so you can flip through every interface to see where traffic is actually flowing. Each switch starts the view fresh for the new interface and keeps your active filter; with the on-disk archive enabled, the previous interface's buffered packets are archived rather than dropped, so rewind can still reach them (filter on `iface=` to tell them apart).
 
 ![Interface picker listing real local interfaces](docs/screenshot-picker.png)
 
@@ -141,7 +144,8 @@ Requires SSH access to the host and `tcpdump` installed there (no root needed lo
 | Key | Action |
 |---|---|
 | `↑`/`↓` or `j`/`k` | move the interface-picker cursor |
-| `enter` | select an interface / apply a filter |
+| `enter` | select an interface / apply a filter / view packet detail |
+| `tab` / `shift+tab` | switch capture to the next / previous interface (local capture only) |
 | `/` | edit the filter |
 | `esc` | cancel filter editing |
 | `←` / `→` | rewind backward / forward in time |
