@@ -43,11 +43,22 @@ type Model struct {
 	cursor int
 
 	label  string // interface name, or a remote host label
+	host   string // remote host being captured on, "" for local capture
 	open   SourceOpener
 	source capture.Source
 	ring   *store.Ring
 	table  table.Model
 	dirty  bool // true when the ring or the active filter changed since the last table rebuild
+
+	// openGen counts interface opens requested via the picker or tab
+	// switching. Each openSource result carries the gen it was requested
+	// under, so a slow open that's been superseded by a later tab press is
+	// closed and dropped instead of replacing the newer source.
+	openGen int
+	// ticking is true once the tickCmd chain is running; it re-arms itself
+	// for the rest of the program, so switching sources must not start a
+	// second one.
+	ticking bool
 
 	// displayed mirrors table's rows 1:1 - the table only stores string
 	// cells, so this is how a table cursor position maps back to a full
@@ -99,16 +110,54 @@ func NewModel(ifaces []capture.Interface, open SourceOpener) Model {
 
 // NewModelWithSource skips the picker and starts live-tailing an
 // already-open source immediately - used for remote capture, where there's
-// no local interface list to choose from.
+// no local interface list to choose from (and so no tab switching).
 func NewModelWithSource(label string, source capture.Source) Model {
 	return Model{
 		state:     viewLiveTail,
 		label:     label,
 		source:    source,
+		ticking:   source != nil, // Init starts the tick chain
 		ring:      store.NewRing(ringCapacity, 0),
 		table:     newTable(),
 		filterBar: newFilterBarState(),
 	}
+}
+
+// SetRemoteHost marks the model as capturing on host over SSH: interface
+// labels become "host (iface)" and the picker says which host it's
+// listing. Call before Init/the first Update.
+func (m *Model) SetRemoteHost(host string) {
+	m.host = host
+}
+
+// SetInterfaces enables tab/shift+tab switching for a model built with
+// NewModelWithSource (remote capture started on an interface given up
+// front), positioning the cursor on current. If current isn't in ifaces
+// (e.g. the remote's tcpdump -D omitted it) it's added at the front, so
+// cycling can always get back to it.
+func (m *Model) SetInterfaces(ifaces []capture.Interface, open SourceOpener, current string) {
+	idx := -1
+	for i, iface := range ifaces {
+		if iface.Name == current {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		ifaces = append([]capture.Interface{{Name: current}}, ifaces...)
+		idx = 0
+	}
+	m.ifaces = ifaces
+	m.open = open
+	m.cursor = idx
+}
+
+// ifaceLabel is what the header shows for capturing on iface.
+func (m Model) ifaceLabel(iface string) string {
+	if m.host == "" {
+		return iface
+	}
+	return fmt.Sprintf("%s (%s)", m.host, iface)
 }
 
 // EnableArchive wires a bounded on-disk archive into the model: packets
@@ -119,6 +168,12 @@ func NewModelWithSource(label string, source capture.Source) Model {
 func (m *Model) EnableArchive(a *store.Archive, r *store.ArchiveReader) {
 	m.archive = a
 	m.archiveReader = r
+}
+
+// SetStatus sets the transient informational line shown under the live
+// view, e.g. for main to explain why something at startup was degraded.
+func (m *Model) SetStatus(status string) {
+	m.status = status
 }
 
 // SetExportDir sets the directory pcap exports (the "e" key) are written
@@ -157,8 +212,23 @@ type packetsClosedMsg struct{}
 type sourceErrMsg struct{ err error }
 type sourceOpenedMsg struct {
 	source capture.Source
+	gen    int
 }
-type openErrMsg struct{ err error }
+type openErrMsg struct {
+	err error
+	gen int
+}
+
+// fromSourceMsg tags a message read off one specific source's channels.
+// After a tab switch the old source's pending waitForPacket/
+// waitForSourceErr reads still complete (with a last packet, or the
+// close), and without the tag they'd be indistinguishable from the new
+// source's - leaking old-interface packets into the new view and arming a
+// duplicate reader on the new source.
+type fromSourceMsg struct {
+	source capture.Source
+	msg    tea.Msg
+}
 
 // tickMsg drives the table redraw on a fixed cadence (see renderInterval)
 // instead of on every packetMsg - rebuilding and restyling a 1000-row table
@@ -178,9 +248,9 @@ func waitForPacket(source capture.Source) tea.Cmd {
 	return func() tea.Msg {
 		p, ok := <-source.Packets()
 		if !ok {
-			return packetsClosedMsg{}
+			return fromSourceMsg{source: source, msg: packetsClosedMsg{}}
 		}
-		return packetMsg(p)
+		return fromSourceMsg{source: source, msg: packetMsg(p)}
 	}
 }
 
@@ -190,17 +260,84 @@ func waitForSourceErr(source capture.Source) tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return sourceErrMsg{err: err}
+		return fromSourceMsg{source: source, msg: sourceErrMsg{err: err}}
 	}
 }
 
-func openSource(open SourceOpener, iface string) tea.Cmd {
+func openSource(open SourceOpener, iface string, gen int) tea.Cmd {
 	return func() tea.Msg {
 		src, err := open(iface)
 		if err != nil {
-			return openErrMsg{err: err}
+			return openErrMsg{err: err, gen: gen}
 		}
-		return sourceOpenedMsg{source: src}
+		return sourceOpenedMsg{source: src, gen: gen}
+	}
+}
+
+// closeSource closes src off the Update goroutine: closing a libpcap
+// handle can block until its in-flight read times out, which would
+// otherwise freeze the UI on every tab press.
+func closeSource(src capture.Source) tea.Cmd {
+	return func() tea.Msg {
+		_ = src.Close()
+		return nil
+	}
+}
+
+// canSwitchInterface reports whether tab/shift+tab can move capture to
+// another interface: that needs an interface list and an opener (remote
+// capture started without SetInterfaces has neither), and somewhere else
+// to go.
+func (m Model) canSwitchInterface() bool {
+	return m.open != nil && len(m.ifaces) > 1
+}
+
+// switchInterface moves capture delta positions through the interface
+// list (wrapping at either end), local or remote alike: it closes the
+// current source, hands the in-memory ring off to the archive (if
+// enabled, so rewind can still reach the previous interface's traffic)
+// and starts the view fresh for the new interface. The active filter is
+// kept, same as it survives everything else.
+func (m *Model) switchInterface(delta int) tea.Cmd {
+	if !m.canSwitchInterface() {
+		return nil
+	}
+	n := len(m.ifaces)
+	m.cursor = ((m.cursor+delta)%n + n) % n
+	name := m.ifaces[m.cursor].Name
+	m.label = m.ifaceLabel(name)
+	m.err = nil
+	m.status = fmt.Sprintf("opening %s...", m.label)
+
+	var cmds []tea.Cmd
+	if m.source != nil {
+		cmds = append(cmds, closeSource(m.source))
+		m.source = nil
+	}
+	m.resetRing()
+	m.timeline.jumpToLive()
+	m.refreshRows()
+	m.dirty = false
+
+	m.openGen++
+	cmds = append(cmds, openSource(m.open, name, m.openGen))
+	return tea.Batch(cmds...)
+}
+
+// resetRing replaces the in-memory ring with an empty one, first writing
+// everything it held to the archive (when enabled) exactly as if it had
+// been evicted normally.
+func (m *Model) resetRing() {
+	old := m.ring.Snapshot()
+	m.ring = store.NewRing(ringCapacity, 0)
+	if m.archive == nil {
+		return
+	}
+	for _, p := range old {
+		if err := m.archive.Write(p); err != nil {
+			m.err = err
+			return
+		}
 	}
 }
 
@@ -217,13 +354,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 
+	case fromSourceMsg:
+		if msg.source != m.source {
+			return m, nil // from a source a tab switch already replaced
+		}
+		return m.Update(msg.msg)
+
 	case sourceOpenedMsg:
+		if msg.gen != m.openGen {
+			return m, closeSource(msg.source) // superseded by a later switch
+		}
 		m.source = msg.source
 		m.state = viewLiveTail
-		return m, tea.Batch(waitForPacket(m.source), waitForSourceErr(m.source), tickCmd())
+		m.status = ""
+		cmds := []tea.Cmd{waitForPacket(m.source), waitForSourceErr(m.source)}
+		if !m.ticking {
+			m.ticking = true
+			cmds = append(cmds, tickCmd())
+		}
+		return m, tea.Batch(cmds...)
 
 	case openErrMsg:
+		if msg.gen != m.openGen {
+			return m, nil
+		}
 		m.err = msg.err
+		m.status = ""
 		return m, nil
 
 	case packetMsg:
@@ -256,9 +412,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshRows()
 			m.dirty = false
 		}
-		if m.state != viewLiveTail {
-			return m, nil
-		}
+		// Keep ticking through detail/help too: those overlays return to
+		// the live view, which needs the chain still running to redraw.
 		return m, tickCmd()
 	}
 
@@ -302,8 +457,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.ifaces) == 0 {
 				return m, nil
 			}
-			m.label = m.ifaces[m.cursor].Name
-			return m, openSource(m.open, m.label)
+			name := m.ifaces[m.cursor].Name
+			m.label = m.ifaceLabel(name)
+			m.openGen++
+			return m, openSource(m.open, name, m.openGen)
 		}
 		return m, nil
 	}
@@ -339,6 +496,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = viewDetail
 		}
 		return m, nil
+	case "tab":
+		return m, m.switchInterface(1)
+	case "shift+tab":
+		return m, m.switchInterface(-1)
 	case "?":
 		m.state = viewHelp
 		return m, nil
@@ -456,6 +617,7 @@ const helpText = `tcpview - keybindings
 
   up/down, j/k    move the table cursor / interface picker cursor
   enter           view packet detail (live-tail) / select interface (picker)
+  tab / shift+tab switch capture to the next / previous interface
   /               edit the filter
   esc             cancel filter editing
   left / right    rewind backward / forward in time
@@ -470,7 +632,11 @@ press any key to close this help
 
 func (m Model) viewPicker() string {
 	var b strings.Builder
-	b.WriteString("tcpview - choose an interface\n\n")
+	if m.host != "" {
+		fmt.Fprintf(&b, "tcpview - choose an interface on %s\n\n", m.host)
+	} else {
+		b.WriteString("tcpview - choose an interface\n\n")
+	}
 	if len(m.ifaces) == 0 {
 		b.WriteString("  (no interfaces found)\n")
 	}
@@ -498,7 +664,11 @@ func (m Model) viewLiveTail() string {
 	if m.timeline.active {
 		modeLabel = "rewound"
 	}
-	fmt.Fprintf(&b, "tcpview - %s: %s  (%d packets shown)\n\n", modeLabel, m.label, len(m.table.Rows()))
+	current := m.label
+	if m.canSwitchInterface() {
+		current = fmt.Sprintf("%s [%d/%d, tab/shift+tab to switch]", m.label, m.cursor+1, len(m.ifaces))
+	}
+	fmt.Fprintf(&b, "tcpview - %s: %s  (%d packets shown)\n\n", modeLabel, current, len(m.table.Rows()))
 	b.WriteString(m.table.View())
 	b.WriteString("\n\n")
 	b.WriteString(m.timeline.view())

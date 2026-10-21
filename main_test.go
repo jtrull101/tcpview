@@ -42,9 +42,9 @@ func withStubs(t *testing.T, teaErr error, privErr error, fn func(captured *tea.
 	stubMu.Lock()
 	defer stubMu.Unlock()
 
-	origTea, origPriv, origRemote, origArchive := runTeaProgram, checkCapturePrivilegesFn, newRemoteSource, newArchiveFn
+	origTea, origPriv, origRemote, origList, origArchive := runTeaProgram, checkCapturePrivilegesFn, newRemoteSource, listRemoteInterfaces, newArchiveFn
 	defer func() {
-		runTeaProgram, checkCapturePrivilegesFn, newRemoteSource, newArchiveFn = origTea, origPriv, origRemote, origArchive
+		runTeaProgram, checkCapturePrivilegesFn, newRemoteSource, listRemoteInterfaces, newArchiveFn = origTea, origPriv, origRemote, origList, origArchive
 	}()
 
 	var captured tea.Model
@@ -54,6 +54,9 @@ func withStubs(t *testing.T, teaErr error, privErr error, fn func(captured *tea.
 	}
 	checkCapturePrivilegesFn = func() error { return privErr }
 	newRemoteSource = func(remote.Options) (capture.Source, error) { return newNoopSource(), nil }
+	listRemoteInterfaces = func(remote.Options) ([]capture.Interface, error) {
+		return []capture.Interface{{Name: "eth0"}, {Name: "eth1"}}, nil
+	}
 	// Never let a test touch the real default archive dir (~/.cache/...) -
 	// redirect to a throwaway temp dir instead.
 	archiveDir := t.TempDir()
@@ -107,11 +110,12 @@ func TestRun_RemoteSourceErrorSkipsTea(t *testing.T) {
 	t.Parallel()
 	stubMu.Lock()
 	defer stubMu.Unlock()
-	origTea, origRemote := runTeaProgram, newRemoteSource
-	defer func() { runTeaProgram, newRemoteSource = origTea, origRemote }()
+	origTea, origRemote, origList := runTeaProgram, newRemoteSource, listRemoteInterfaces
+	defer func() { runTeaProgram, newRemoteSource, listRemoteInterfaces = origTea, origRemote, origList }()
 
 	called := false
 	runTeaProgram = func(tea.Model) error { called = true; return nil }
+	listRemoteInterfaces = func(remote.Options) ([]capture.Interface, error) { return nil, nil }
 	newRemoteSource = func(remote.Options) (capture.Source, error) {
 		return nil, fmt.Errorf("ssh: connection refused")
 	}
@@ -147,6 +151,57 @@ func TestRun_NoArchiveFlagSkipsArchiveSetup(t *testing.T) {
 	if archiveCalled {
 		t.Fatal("newArchiveFn was called despite -no-archive")
 	}
+}
+
+func TestRun_RemoteWithoutIfaceShowsRemotePicker(t *testing.T) {
+	t.Parallel()
+	withStubs(t, nil, nil, func(captured *tea.Model) {
+		var opened []string
+		newRemoteSource = func(opts remote.Options) (capture.Source, error) {
+			opened = append(opened, opts.Host+"/"+opts.Iface)
+			return newNoopSource(), nil
+		}
+		code := run([]string{"-remote", "fake-host"}, devNull(t))
+		if code != 0 {
+			t.Fatalf("run() = %d, want 0", code)
+		}
+		if *captured == nil {
+			t.Fatal("runTeaProgram was never called")
+		}
+		if len(opened) != 0 {
+			t.Fatalf("opened %v before the user picked anything", opened)
+		}
+		out := (*captured).View()
+		if !strings.Contains(out, "choose an interface on fake-host") || !strings.Contains(out, "eth1") {
+			t.Fatalf("View() = %q, want the remote host's interface picker", out)
+		}
+
+		// Picking one opens it on the remote host.
+		next, cmd := (*captured).Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatal("enter in the remote picker returned no open cmd")
+		}
+		next, _ = next.Update(cmd())
+		if len(opened) != 1 || opened[0] != "fake-host/eth0" {
+			t.Fatalf("opened %v, want [fake-host/eth0]", opened)
+		}
+		if out := next.View(); !strings.Contains(out, "fake-host (eth0) [1/2") {
+			t.Fatalf("View() after pick = %q, want the host-qualified label with switch position", out)
+		}
+	})
+}
+
+func TestRun_RemoteWithIfaceEnablesSwitching(t *testing.T) {
+	t.Parallel()
+	withStubs(t, nil, nil, func(captured *tea.Model) {
+		code := run([]string{"-remote", "fake-host", "-remote-iface", "eth1"}, devNull(t))
+		if code != 0 {
+			t.Fatalf("run() = %d, want 0", code)
+		}
+		if out := (*captured).View(); !strings.Contains(out, "fake-host (eth1) [2/2, tab/shift+tab") {
+			t.Fatalf("View() = %q, want switching positioned on eth1", out)
+		}
+	})
 }
 
 // --- negative ---
@@ -202,15 +257,38 @@ func TestRun_UnknownFlagFailsFast(t *testing.T) {
 	})
 }
 
-func TestRun_RemoteWithoutIfaceFailsFast(t *testing.T) {
+func TestRun_RemoteListFailureWithoutIfaceFailsFast(t *testing.T) {
 	t.Parallel()
 	withStubs(t, nil, nil, func(captured *tea.Model) {
+		listRemoteInterfaces = func(remote.Options) ([]capture.Interface, error) {
+			return nil, fmt.Errorf("tcpdump: command not found")
+		}
 		code := run([]string{"-remote", "fake-host"}, devNull(t))
-		if code != 2 {
-			t.Fatalf("run() = %d, want 2 when -remote-iface is missing", code)
+		if code != 1 {
+			t.Fatalf("run() = %d, want 1 when the remote list fails and no -remote-iface was given", code)
 		}
 		if *captured != nil {
-			t.Fatal("runTeaProgram was called despite a missing -remote-iface")
+			t.Fatal("runTeaProgram was called with nothing to show")
+		}
+	})
+}
+
+func TestRun_RemoteListFailureWithIfaceStillCaptures(t *testing.T) {
+	t.Parallel()
+	withStubs(t, nil, nil, func(captured *tea.Model) {
+		listRemoteInterfaces = func(remote.Options) ([]capture.Interface, error) {
+			return nil, fmt.Errorf("tcpdump -D: permission denied")
+		}
+		code := run([]string{"-remote", "fake-host", "-remote-iface", "eth0"}, devNull(t))
+		if code != 0 {
+			t.Fatalf("run() = %d, want 0 - a known iface doesn't need the list", code)
+		}
+		out := (*captured).View()
+		if strings.Contains(out, "tab/shift+tab") {
+			t.Fatalf("View() = %q, offers switching without an interface list", out)
+		}
+		if !strings.Contains(out, "interface switching unavailable: tcpdump -D: permission denied") {
+			t.Fatalf("View() = %q, want it to say why switching is off", out)
 		}
 	})
 }

@@ -40,6 +40,11 @@ var newRemoteSource = func(opts remote.Options) (capture.Source, error) {
 	return remote.New(opts)
 }
 
+// listRemoteInterfaces is a seam over remote.ListInterfaces, swapped out
+// in tests so runRemote's wiring is testable without a real ssh round
+// trip.
+var listRemoteInterfaces = remote.ListInterfaces
+
 // newArchiveFn is a seam over store.NewArchive, swapped out in tests so
 // archive wiring is testable without touching the real filesystem default
 // location.
@@ -58,7 +63,7 @@ func run(args []string, stderr *os.File) int {
 	fs := flag.NewFlagSet("tcpview", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	remoteHost := fs.String("remote", "", "capture on a remote host over SSH, e.g. user@host")
-	remoteIface := fs.String("remote-iface", "", "remote interface name to capture on (required with -remote)")
+	remoteIface := fs.String("remote-iface", "", "remote interface to start capturing on (with -remote; omit to pick from the remote's interface list)")
 	archiveDir := fs.String("archive-dir", defaultArchiveDir(), "directory for the on-disk rewind archive")
 	archiveCapGiB := fs.Float64("archive-cap-gib", 1.0, "max total disk space (GiB) the rewind archive may use")
 	noArchive := fs.Bool("no-archive", false, "disable the on-disk rewind archive (rewind is then limited to what's still in memory)")
@@ -130,18 +135,37 @@ func setupArchive(ac archiveConfig) (*store.Archive, *store.ArchiveReader, error
 }
 
 func runRemote(host, iface string, ac archiveConfig, stderr *os.File) int {
+	open := func(name string) (capture.Source, error) {
+		return newRemoteSource(remote.Options{Host: host, Iface: name})
+	}
+
+	// The remote's interface list feeds the picker (no -remote-iface) or
+	// tab switching (with one). Only the former can't do without it.
+	ifaces, listErr := listRemoteInterfaces(remote.Options{Host: host})
+
+	var m ui.Model
 	if iface == "" {
-		fmt.Fprintln(stderr, "tcpview: -remote-iface is required when using -remote")
-		return 2
+		if listErr != nil {
+			fmt.Fprintf(stderr, "tcpview: %v\n(pass -remote-iface to capture on a known interface without listing them)\n", listErr)
+			return 1
+		}
+		m = ui.NewModel(ifaces, open)
+		m.SetRemoteHost(host)
+	} else {
+		src, err := open(iface)
+		if err != nil {
+			fmt.Fprintf(stderr, "tcpview: %v\n", err)
+			return 1
+		}
+		m = ui.NewModelWithSource(fmt.Sprintf("%s (%s)", host, iface), src)
+		m.SetRemoteHost(host)
+		if listErr == nil {
+			m.SetInterfaces(ifaces, open, iface)
+		} else {
+			m.SetStatus(fmt.Sprintf("interface switching unavailable: %v", listErr))
+		}
 	}
 
-	src, err := newRemoteSource(remote.Options{Host: host, Iface: iface})
-	if err != nil {
-		fmt.Fprintf(stderr, "tcpview: %v\n", err)
-		return 1
-	}
-
-	m := ui.NewModelWithSource(fmt.Sprintf("%s (%s)", host, iface), src)
 	if a, r, err := setupArchive(ac); err != nil {
 		fmt.Fprintf(stderr, "tcpview: archive: %v\n", err)
 		return 1

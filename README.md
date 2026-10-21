@@ -7,6 +7,8 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 - [Features](#features)
 - [A tour, in screenshots](#a-tour-in-screenshots)
   - [No `tcpdump -D` required](#no-tcpdump--d-required)
+  - [Flip through interfaces without restarting](#flip-through-interfaces-without-restarting)
+  - [Remote hosts get the same picker](#remote-hosts-get-the-same-picker)
   - [Filtering is live, not a restart](#filtering-is-live-not-a-restart)
   - [Rewind: the actually novel part](#rewind-the-actually-novel-part)
   - [Packet detail, down to the bytes](#packet-detail-down-to-the-bytes)
@@ -21,11 +23,12 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 - [Development](#development)
   - [CI / releases](#ci--releases)
 
-![tcpview live-tailing loopback traffic, filtered to proto=icmp](docs/screenshot.png)
+![tcpview live-tailing loopback traffic on lo (3 of 10 interfaces), filtered to proto=icmp](docs/screenshot.png)
 
 ## Features
 
 - **Live capture** on a local interface via libpcap, or on a **remote host over SSH** (`ssh <host> tcpdump -i <iface> -U -w -`, piped and decoded locally - no agent to install on the remote box, just SSH access and `tcpdump`).
+- **Live interface switching** - press `tab` / `shift+tab` mid-capture to cycle through interfaces without restarting, locally or on a remote host.
 - **Interactive filtering** - press `/` and type a simple expression like `proto=tcp dport=443 src=10.0.0.0/24`, applied live against whatever's currently buffered.
 - **Rewind** - press `←` to scrub backward through traffic that already scrolled off, `→` to scrub forward, `L` to jump back to live. Recent traffic is served from an in-memory ring; anything older comes from a bounded on-disk archive (see below).
 - **Packet detail** - press `enter` on any row for a parsed field breakdown plus a hex+ASCII dump of the raw frame.
@@ -42,21 +45,39 @@ Launching with no arguments lists every capturable interface by name and descrip
 
 ![Interface picker listing real local interfaces](docs/screenshot-picker.png)
 
+### Flip through interfaces without restarting
+
+That first pick isn't final: once capturing, `tab` / `shift+tab` moves capture to the next / previous interface in the same list (wrapping at either end), so you can flip through every interface to see where traffic is actually flowing. The header always shows which one you're on. Here `shift+tab` has moved from the loopback capture above to `eth0`, where the only traffic is HTTPS out to the internet:
+
+![Live capture on eth0, interface 1 of 10, after switching with shift+tab](docs/screenshot-switch.png)
+
+Each switch starts the view fresh for the new interface and keeps your active filter; with the on-disk archive enabled, the previous interface's buffered packets are archived rather than dropped, so rewind can still reach them (filter on `iface=` to tell them apart).
+
+### Remote hosts get the same picker
+
+`-remote user@host` on its own runs `tcpdump -D` on the host over SSH and lists *its* interfaces in the same picker (these two were taken over a real SSH session, to `localhost`):
+
+![Interface picker listing a remote host's interfaces over SSH](docs/screenshot-remote-picker.png)
+
+From there it's the same UI, including `tab` / `shift+tab` to switch the remote capture between interfaces:
+
+![Live remote capture on root@localhost (lo), interface 3 of 10](docs/screenshot-remote-live.png)
+
 ### Filtering is live, not a restart
 
 Press `/` and type an expression - `iface`, `src`, `dst`, `sport`, `dport`, `proto` - while packets keep flowing in the background underneath it:
 
 ![Typing a filter expression while traffic keeps streaming](docs/screenshot-filter-edit.png)
 
-Hit `enter` and the view narrows instantly against the *existing* buffer - no re-capture, no dropped history. Here it's narrowed a noisy multi-protocol capture down to exactly the real HTTPS flows on port 443:
+Hit `enter` and the view narrows instantly against the *existing* buffer - no re-capture, no dropped history. Here it's narrowed a noisy multi-protocol capture down to just the outbound HTTPS traffic, `dport=443 proto=tcp`:
 
-![1000 buffered packets narrowed down to 235 real HTTPS flows on dport=443](docs/screenshot-filter-applied.png)
+![1000 buffered packets narrowed down to 358 outbound HTTPS packets on dport=443](docs/screenshot-filter-applied.png)
 
 ### Rewind: the actually novel part
 
 This is the feature a plain `tcpdump`/Wireshark live-capture session can't give you: scrub backward in time with `←`/`→` to see traffic that already scrolled off-screen, without having had to pre-emptively start a recording. Recent history comes from an in-memory ring; anything older is transparently pulled from a bounded on-disk archive that rotates and prunes itself (see [Rewind archive flags](#rewind-archive-flags) below) - the UI doesn't care which, it just shows you what was happening at that point in time, filters and all:
 
-![REWOUND to a point 25 seconds in the past, showing real historical traffic](docs/screenshot-rewind.png)
+![REWOUND to a point in the past, showing 1468 real historical packets from the ring and the archive](docs/screenshot-rewind.png)
 
 ### Packet detail, down to the bytes
 
@@ -131,8 +152,13 @@ sudo setcap cap_net_raw,cap_net_admin=eip ./tcpview
 ### Remote capture
 
 ```sh
-./tcpview -remote user@host -remote-iface eth0
+./tcpview -remote user@host                    # pick from the remote host's interface list
+./tcpview -remote user@host -remote-iface eth0 # start straight on eth0
 ```
+
+Without `-remote-iface`, tcpview runs `tcpdump -D` on the remote host over SSH and shows the same interface picker as local capture, listing the *remote* host's interfaces. Either way, `tab` / `shift+tab` then switches the remote capture between those interfaces live. If listing fails (e.g. an old or restricted `tcpdump`), `-remote-iface` still works, just without switching; the live view says why.
+
+Every remote interface (and every switch) is its own `ssh` session, so key-based auth is strongly recommended over password prompts. An SSH `ControlMaster`/`ControlPersist` config for the host makes switching near-instant by reusing one connection.
 
 Requires SSH access to the host and `tcpdump` installed there (no root needed locally for this mode - the privilege requirement is on the remote end, where `tcpdump` runs).
 
@@ -141,7 +167,8 @@ Requires SSH access to the host and `tcpdump` installed there (no root needed lo
 | Key | Action |
 |---|---|
 | `↑`/`↓` or `j`/`k` | move the interface-picker cursor |
-| `enter` | select an interface / apply a filter |
+| `enter` | select an interface / apply a filter / view packet detail |
+| `tab` / `shift+tab` | switch capture to the next / previous interface (local or remote) |
 | `/` | edit the filter |
 | `esc` | cancel filter editing |
 | `←` / `→` | rewind backward / forward in time |

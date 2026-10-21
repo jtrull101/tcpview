@@ -54,6 +54,21 @@ func samplePacket(n int) store.Packet {
 	}
 }
 
+// unwrapFromSource returns the message inside a fromSourceMsg, failing
+// the test if it's tagged with a source other than want. Anything that
+// isn't a fromSourceMsg (e.g. a tickMsg) is returned as is.
+func unwrapFromSource(t *testing.T, msg tea.Msg, want capture.Source) tea.Msg {
+	t.Helper()
+	fm, ok := msg.(fromSourceMsg)
+	if !ok {
+		return msg
+	}
+	if fm.source != want {
+		t.Fatalf("fromSourceMsg tagged with %v, want %v", fm.source, want)
+	}
+	return fm.msg
+}
+
 func keyMsg(s string) tea.KeyMsg {
 	switch s {
 	case "up":
@@ -66,6 +81,10 @@ func keyMsg(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}
 	case "ctrl+c":
 		return tea.KeyMsg{Type: tea.KeyCtrlC}
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyMsg{Type: tea.KeyShiftTab}
 	default:
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 	}
@@ -189,7 +208,7 @@ func TestModel_Init_LiveTailArmsPacketErrorAndTickCmds(t *testing.T) {
 
 	gotPacket, gotErr, gotTick := false, false, false
 	for _, sub := range batch {
-		switch sub().(type) {
+		switch unwrapFromSource(t, sub(), fs).(type) {
 		case packetMsg:
 			gotPacket = true
 		case sourceErrMsg:
@@ -254,7 +273,7 @@ func TestWaitForPacket_ClosedChannelYieldsPacketsClosedMsg(t *testing.T) {
 	t.Parallel()
 	fs := newFakeSource()
 	fs.Close()
-	msg := waitForPacket(fs)()
+	msg := unwrapFromSource(t, waitForPacket(fs)(), fs)
 	if _, ok := msg.(packetsClosedMsg); !ok {
 		t.Fatalf("waitForPacket on closed source = %T, want packetsClosedMsg", msg)
 	}
@@ -273,7 +292,7 @@ func TestWaitForSourceErr_DeliversError(t *testing.T) {
 	t.Parallel()
 	fs := newFakeSource()
 	fs.errs <- fmt.Errorf("link down")
-	msg := waitForSourceErr(fs)()
+	msg := unwrapFromSource(t, waitForSourceErr(fs)(), fs)
 	se, ok := msg.(sourceErrMsg)
 	if !ok || se.err == nil {
 		t.Fatalf("waitForSourceErr = %#v, want a populated sourceErrMsg", msg)
