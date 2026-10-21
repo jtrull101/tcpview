@@ -452,3 +452,80 @@ func TestIfaceSwitch_Stress_BurstOfTabsOnlyLastOpenWins(t *testing.T) {
 		t.Fatalf("label = %q, want eth%d", m.label, want)
 	}
 }
+
+// --- remote interface switching ---
+
+// remoteLiveOn mirrors main's -remote -remote-iface path: live from the
+// start on current, with the remote's list wired in afterward.
+func remoteLiveOn(t *testing.T, ifaces []capture.Interface, current string) (Model, *recordingOpener) {
+	t.Helper()
+	r := &recordingOpener{}
+	m := NewModelWithSource("box ("+current+")", newFakeSource())
+	m.SetRemoteHost("box")
+	m.SetInterfaces(ifaces, r.open, current)
+	return m, r
+}
+
+func TestRemoteSwitch_TabCyclesRemoteInterfacesWithHostLabel(t *testing.T) {
+	t.Parallel()
+	m, r := remoteLiveOn(t, ifaceList(3), "eth1")
+	if out := m.View(); !strings.Contains(out, "box (eth1) [2/3") {
+		t.Fatalf("View() = %q, want positioned on eth1 with the host label", out)
+	}
+	m = press(t, m, "tab")
+	if m.label != "box (eth2)" || r.names[0] != "eth2" {
+		t.Fatalf("after tab: label=%q opened=%v, want box (eth2) opening eth2", m.label, r.names)
+	}
+	m = press(t, m, "tab")
+	if m.label != "box (eth0)" {
+		t.Fatalf("label after wrap = %q, want box (eth0)", m.label)
+	}
+}
+
+func TestRemoteSwitch_PickerNamesHostAndOpensBareIface(t *testing.T) {
+	t.Parallel()
+	r := &recordingOpener{}
+	m := NewModel(ifaceList(2), r.open)
+	m.SetRemoteHost("box")
+	if out := m.View(); !strings.Contains(out, "choose an interface on box") {
+		t.Fatalf("picker = %q, want it to name the remote host", out)
+	}
+	m = press(t, press(t, m, "down"), "enter")
+	if m.label != "box (eth1)" || len(r.names) != 1 || r.names[0] != "eth1" {
+		t.Fatalf("label=%q opened=%v, want box (eth1) opening bare eth1", m.label, r.names)
+	}
+}
+
+func TestRemoteSwitch_UnlistedCurrentIfaceIsPrependedAndReachable(t *testing.T) {
+	t.Parallel()
+	m, _ := remoteLiveOn(t, ifaceList(2), "tun0")
+	if len(m.ifaces) != 3 || m.ifaces[0].Name != "tun0" || m.cursor != 0 {
+		t.Fatalf("ifaces=%v cursor=%d, want tun0 prepended and selected", m.ifaces, m.cursor)
+	}
+	m = press(t, m, "shift+tab")
+	m = press(t, m, "tab")
+	if m.label != "box (tun0)" {
+		t.Fatalf("label = %q, want cycling to reach tun0 again", m.label)
+	}
+}
+
+func TestRemoteSwitch_SetStatusShownAndClearedBySwitch(t *testing.T) {
+	t.Parallel()
+	m := NewModelWithSource("box (eth0)", newFakeSource())
+	m.SetStatus("interface switching unavailable: boom")
+	if !strings.Contains(m.View(), "interface switching unavailable: boom") {
+		t.Fatal("SetStatus text not shown in the live view")
+	}
+	if _, cmd := update(t, m, keyMsg("tab")); cmd != nil {
+		t.Fatal("tab switched despite no interface list")
+	}
+}
+
+func TestRemoteSwitch_Chaos_EmptyListOnlyHasCurrent(t *testing.T) {
+	t.Parallel()
+	m, r := remoteLiveOn(t, nil, "eth0")
+	m = press(t, m, "tab")
+	if len(r.names) != 0 || strings.Contains(m.View(), "tab/shift+tab") {
+		t.Fatal("an empty remote list (just the current iface) still offered switching")
+	}
+}

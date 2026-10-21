@@ -26,7 +26,7 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 ## Features
 
 - **Live capture** on a local interface via libpcap, or on a **remote host over SSH** (`ssh <host> tcpdump -i <iface> -U -w -`, piped and decoded locally - no agent to install on the remote box, just SSH access and `tcpdump`).
-- **Live interface switching** - press `tab` / `shift+tab` mid-capture to cycle through local interfaces without restarting.
+- **Live interface switching** - press `tab` / `shift+tab` mid-capture to cycle through interfaces without restarting, locally or on a remote host.
 - **Interactive filtering** - press `/` and type a simple expression like `proto=tcp dport=443 src=10.0.0.0/24`, applied live against whatever's currently buffered.
 - **Rewind** - press `←` to scrub backward through traffic that already scrolled off, `→` to scrub forward, `L` to jump back to live. Recent traffic is served from an in-memory ring; anything older comes from a bounded on-disk archive (see below).
 - **Packet detail** - press `enter` on any row for a parsed field breakdown plus a hex+ASCII dump of the raw frame.
@@ -134,8 +134,13 @@ sudo setcap cap_net_raw,cap_net_admin=eip ./tcpview
 ### Remote capture
 
 ```sh
-./tcpview -remote user@host -remote-iface eth0
+./tcpview -remote user@host                    # pick from the remote host's interface list
+./tcpview -remote user@host -remote-iface eth0 # start straight on eth0
 ```
+
+Without `-remote-iface`, tcpview runs `tcpdump -D` on the remote host over SSH and shows the same interface picker as local capture, listing the *remote* host's interfaces. Either way, `tab` / `shift+tab` then switches the remote capture between those interfaces live. If listing fails (e.g. an old or restricted `tcpdump`), `-remote-iface` still works, just without switching; the live view says why.
+
+Every remote interface (and every switch) is its own `ssh` session, so key-based auth is strongly recommended over password prompts. An SSH `ControlMaster`/`ControlPersist` config for the host makes switching near-instant by reusing one connection.
 
 Requires SSH access to the host and `tcpdump` installed there (no root needed locally for this mode - the privilege requirement is on the remote end, where `tcpdump` runs).
 
@@ -145,7 +150,7 @@ Requires SSH access to the host and `tcpdump` installed there (no root needed lo
 |---|---|
 | `↑`/`↓` or `j`/`k` | move the interface-picker cursor |
 | `enter` | select an interface / apply a filter / view packet detail |
-| `tab` / `shift+tab` | switch capture to the next / previous interface (local capture only) |
+| `tab` / `shift+tab` | switch capture to the next / previous interface (local or remote) |
 | `/` | edit the filter |
 | `esc` | cancel filter editing |
 | `←` / `→` | rewind backward / forward in time |

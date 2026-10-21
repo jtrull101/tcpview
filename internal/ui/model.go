@@ -43,6 +43,7 @@ type Model struct {
 	cursor int
 
 	label  string // interface name, or a remote host label
+	host   string // remote host being captured on, "" for local capture
 	open   SourceOpener
 	source capture.Source
 	ring   *store.Ring
@@ -122,6 +123,43 @@ func NewModelWithSource(label string, source capture.Source) Model {
 	}
 }
 
+// SetRemoteHost marks the model as capturing on host over SSH: interface
+// labels become "host (iface)" and the picker says which host it's
+// listing. Call before Init/the first Update.
+func (m *Model) SetRemoteHost(host string) {
+	m.host = host
+}
+
+// SetInterfaces enables tab/shift+tab switching for a model built with
+// NewModelWithSource (remote capture started on an interface given up
+// front), positioning the cursor on current. If current isn't in ifaces
+// (e.g. the remote's tcpdump -D omitted it) it's added at the front, so
+// cycling can always get back to it.
+func (m *Model) SetInterfaces(ifaces []capture.Interface, open SourceOpener, current string) {
+	idx := -1
+	for i, iface := range ifaces {
+		if iface.Name == current {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		ifaces = append([]capture.Interface{{Name: current}}, ifaces...)
+		idx = 0
+	}
+	m.ifaces = ifaces
+	m.open = open
+	m.cursor = idx
+}
+
+// ifaceLabel is what the header shows for capturing on iface.
+func (m Model) ifaceLabel(iface string) string {
+	if m.host == "" {
+		return iface
+	}
+	return fmt.Sprintf("%s (%s)", m.host, iface)
+}
+
 // EnableArchive wires a bounded on-disk archive into the model: packets
 // evicted from the in-memory ring get written to it instead of discarded,
 // and rewind queries fall back to reading it for anything older than what
@@ -130,6 +168,12 @@ func NewModelWithSource(label string, source capture.Source) Model {
 func (m *Model) EnableArchive(a *store.Archive, r *store.ArchiveReader) {
 	m.archive = a
 	m.archiveReader = r
+}
+
+// SetStatus sets the transient informational line shown under the live
+// view, e.g. for main to explain why something at startup was degraded.
+func (m *Model) SetStatus(status string) {
+	m.status = status
 }
 
 // SetExportDir sets the directory pcap exports (the "e" key) are written
@@ -241,25 +285,27 @@ func closeSource(src capture.Source) tea.Cmd {
 }
 
 // canSwitchInterface reports whether tab/shift+tab can move capture to
-// another interface: only local capture has an interface list and an
-// opener, and cycling needs somewhere else to go.
+// another interface: that needs an interface list and an opener (remote
+// capture started without SetInterfaces has neither), and somewhere else
+// to go.
 func (m Model) canSwitchInterface() bool {
 	return m.open != nil && len(m.ifaces) > 1
 }
 
 // switchInterface moves capture delta positions through the interface
-// list (wrapping at either end): it closes the current source, hands the
-// in-memory ring off to the archive (if enabled, so rewind can still
-// reach the previous interface's traffic) and starts the view fresh for
-// the new interface. The active filter is kept, same as it survives
-// everything else.
+// list (wrapping at either end), local or remote alike: it closes the
+// current source, hands the in-memory ring off to the archive (if
+// enabled, so rewind can still reach the previous interface's traffic)
+// and starts the view fresh for the new interface. The active filter is
+// kept, same as it survives everything else.
 func (m *Model) switchInterface(delta int) tea.Cmd {
 	if !m.canSwitchInterface() {
 		return nil
 	}
 	n := len(m.ifaces)
 	m.cursor = ((m.cursor+delta)%n + n) % n
-	m.label = m.ifaces[m.cursor].Name
+	name := m.ifaces[m.cursor].Name
+	m.label = m.ifaceLabel(name)
 	m.err = nil
 	m.status = fmt.Sprintf("opening %s...", m.label)
 
@@ -274,7 +320,7 @@ func (m *Model) switchInterface(delta int) tea.Cmd {
 	m.dirty = false
 
 	m.openGen++
-	cmds = append(cmds, openSource(m.open, m.label, m.openGen))
+	cmds = append(cmds, openSource(m.open, name, m.openGen))
 	return tea.Batch(cmds...)
 }
 
@@ -411,9 +457,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.ifaces) == 0 {
 				return m, nil
 			}
-			m.label = m.ifaces[m.cursor].Name
+			name := m.ifaces[m.cursor].Name
+			m.label = m.ifaceLabel(name)
 			m.openGen++
-			return m, openSource(m.open, m.label, m.openGen)
+			return m, openSource(m.open, name, m.openGen)
 		}
 		return m, nil
 	}
@@ -570,7 +617,7 @@ const helpText = `tcpview - keybindings
 
   up/down, j/k    move the table cursor / interface picker cursor
   enter           view packet detail (live-tail) / select interface (picker)
-  tab / shift+tab switch capture to the next / previous interface (local only)
+  tab / shift+tab switch capture to the next / previous interface
   /               edit the filter
   esc             cancel filter editing
   left / right    rewind backward / forward in time
@@ -585,7 +632,11 @@ press any key to close this help
 
 func (m Model) viewPicker() string {
 	var b strings.Builder
-	b.WriteString("tcpview - choose an interface\n\n")
+	if m.host != "" {
+		fmt.Fprintf(&b, "tcpview - choose an interface on %s\n\n", m.host)
+	} else {
+		b.WriteString("tcpview - choose an interface\n\n")
+	}
 	if len(m.ifaces) == 0 {
 		b.WriteString("  (no interfaces found)\n")
 	}
@@ -613,11 +664,11 @@ func (m Model) viewLiveTail() string {
 	if m.timeline.active {
 		modeLabel = "rewound"
 	}
-	ifaceLabel := m.label
+	current := m.label
 	if m.canSwitchInterface() {
-		ifaceLabel = fmt.Sprintf("%s [%d/%d, tab/shift+tab to switch]", m.label, m.cursor+1, len(m.ifaces))
+		current = fmt.Sprintf("%s [%d/%d, tab/shift+tab to switch]", m.label, m.cursor+1, len(m.ifaces))
 	}
-	fmt.Fprintf(&b, "tcpview - %s: %s  (%d packets shown)\n\n", modeLabel, ifaceLabel, len(m.table.Rows()))
+	fmt.Fprintf(&b, "tcpview - %s: %s  (%d packets shown)\n\n", modeLabel, current, len(m.table.Rows()))
 	b.WriteString(m.table.View())
 	b.WriteString("\n\n")
 	b.WriteString(m.timeline.view())

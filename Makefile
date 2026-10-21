@@ -58,6 +58,7 @@ fuzz: ## Run a short fuzz smoke pass (FUZZTIME=10s) across every Fuzz target
 	go test ./internal/filter/... -run=^$$ -fuzz=FuzzFilterMatches -fuzztime=$(FUZZTIME)
 	go test ./internal/capture/... -run=^$$ -fuzz=FuzzDecode -fuzztime=$(FUZZTIME)
 	go test ./internal/store/... -run=^$$ -fuzz=FuzzReadArchiveFile -fuzztime=$(FUZZTIME)
+	go test ./internal/remote/... -run=^$$ -fuzz=FuzzParseTcpdumpList -fuzztime=$(FUZZTIME)
 	go test . -run=^$$ -fuzz=FuzzParseCapEff -fuzztime=$(FUZZTIME)
 
 .PHONY: fmt

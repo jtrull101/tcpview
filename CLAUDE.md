@@ -18,7 +18,7 @@ Every non-trivial component (each package under `internal/`) needs all of the fo
 
 ## Remote capture
 
-`internal/remote` runs capture on a remote host over SSH by shelling out to the remote's own `tcpdump` (`ssh <host> tcpdump -i <iface> -U -w -`) and decoding the piped pcap stream locally with `gopacket/pcapgo.Reader` - same downstream pipeline (`store`, `filter`, `ui`) as local capture, just a different packet source. This deliberately avoids requiring a cross-compiled `tcpview` agent binary on every remote box; it only needs SSH access and `tcpdump`, both of which are near-universal already. Reconnect/backoff behavior on a dropped SSH session is chaos-tested per the policy above, not just assumed to work.
+`internal/remote` runs capture on a remote host over SSH by shelling out to the remote's own `tcpdump` (`ssh <host> tcpdump -i <iface> -U -w -`) and decoding the piped pcap stream locally with `gopacket/pcapgo.Reader` - same downstream pipeline (`store`, `filter`, `ui`) as local capture, just a different packet source. The remote interface list (for the picker and tab switching) comes the same way, from `ssh <host> tcpdump -D`. This deliberately avoids requiring a cross-compiled `tcpview` agent binary on every remote box; it only needs SSH access and `tcpdump`, both of which are near-universal already. Reconnect/backoff behavior on a dropped SSH session is chaos-tested per the policy above, not just assumed to work.
 
 ## Archive disk cap
 
