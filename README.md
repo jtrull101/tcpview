@@ -7,6 +7,8 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 - [Features](#features)
 - [A tour, in screenshots](#a-tour-in-screenshots)
   - [No `tcpdump -D` required](#no-tcpdump--d-required)
+  - [Flip through interfaces without restarting](#flip-through-interfaces-without-restarting)
+  - [Remote hosts get the same picker](#remote-hosts-get-the-same-picker)
   - [Filtering is live, not a restart](#filtering-is-live-not-a-restart)
   - [Rewind: the actually novel part](#rewind-the-actually-novel-part)
   - [Packet detail, down to the bytes](#packet-detail-down-to-the-bytes)
@@ -21,7 +23,7 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 - [Development](#development)
   - [CI / releases](#ci--releases)
 
-![tcpview live-tailing loopback traffic, filtered to proto=icmp](docs/screenshot.png)
+![tcpview live-tailing loopback traffic on lo (3 of 10 interfaces), filtered to proto=icmp](docs/screenshot.png)
 
 ## Features
 
@@ -41,9 +43,25 @@ Everything below is a real screenshot of real traffic captured on an actual mach
 
 Launching with no arguments lists every capturable interface by name and description - including the real-but-easy-to-forget ones like `any` (capture on everything at once) alongside physical NICs, bridges, and `nflog`/`nfqueue`. Pick one with `↑`/`↓` + `enter`; no prior knowledge of interface names needed.
 
-That first pick isn't final: once capturing, `tab` / `shift+tab` moves capture to the next / previous interface in the same list (wrapping at either end), so you can flip through every interface to see where traffic is actually flowing. Each switch starts the view fresh for the new interface and keeps your active filter; with the on-disk archive enabled, the previous interface's buffered packets are archived rather than dropped, so rewind can still reach them (filter on `iface=` to tell them apart).
-
 ![Interface picker listing real local interfaces](docs/screenshot-picker.png)
+
+### Flip through interfaces without restarting
+
+That first pick isn't final: once capturing, `tab` / `shift+tab` moves capture to the next / previous interface in the same list (wrapping at either end), so you can flip through every interface to see where traffic is actually flowing. The header always shows which one you're on. Here `shift+tab` has moved from the loopback capture above to `eth0`, where the only traffic is HTTPS out to the internet:
+
+![Live capture on eth0, interface 1 of 10, after switching with shift+tab](docs/screenshot-switch.png)
+
+Each switch starts the view fresh for the new interface and keeps your active filter; with the on-disk archive enabled, the previous interface's buffered packets are archived rather than dropped, so rewind can still reach them (filter on `iface=` to tell them apart).
+
+### Remote hosts get the same picker
+
+`-remote user@host` on its own runs `tcpdump -D` on the host over SSH and lists *its* interfaces in the same picker (these two were taken over a real SSH session, to `localhost`):
+
+![Interface picker listing a remote host's interfaces over SSH](docs/screenshot-remote-picker.png)
+
+From there it's the same UI, including `tab` / `shift+tab` to switch the remote capture between interfaces:
+
+![Live remote capture on root@localhost (lo), interface 3 of 10](docs/screenshot-remote-live.png)
 
 ### Filtering is live, not a restart
 
@@ -51,15 +69,15 @@ Press `/` and type an expression - `iface`, `src`, `dst`, `sport`, `dport`, `pro
 
 ![Typing a filter expression while traffic keeps streaming](docs/screenshot-filter-edit.png)
 
-Hit `enter` and the view narrows instantly against the *existing* buffer - no re-capture, no dropped history. Here it's narrowed a noisy multi-protocol capture down to exactly the real HTTPS flows on port 443:
+Hit `enter` and the view narrows instantly against the *existing* buffer - no re-capture, no dropped history. Here it's narrowed a noisy multi-protocol capture down to just the outbound HTTPS traffic, `dport=443 proto=tcp`:
 
-![1000 buffered packets narrowed down to 235 real HTTPS flows on dport=443](docs/screenshot-filter-applied.png)
+![1000 buffered packets narrowed down to 358 outbound HTTPS packets on dport=443](docs/screenshot-filter-applied.png)
 
 ### Rewind: the actually novel part
 
 This is the feature a plain `tcpdump`/Wireshark live-capture session can't give you: scrub backward in time with `←`/`→` to see traffic that already scrolled off-screen, without having had to pre-emptively start a recording. Recent history comes from an in-memory ring; anything older is transparently pulled from a bounded on-disk archive that rotates and prunes itself (see [Rewind archive flags](#rewind-archive-flags) below) - the UI doesn't care which, it just shows you what was happening at that point in time, filters and all:
 
-![REWOUND to a point 25 seconds in the past, showing real historical traffic](docs/screenshot-rewind.png)
+![REWOUND to a point in the past, showing 1468 real historical packets from the ring and the archive](docs/screenshot-rewind.png)
 
 ### Packet detail, down to the bytes
 
