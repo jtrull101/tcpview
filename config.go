@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Config is the optional JSON config file's shape - every field is
@@ -17,8 +18,20 @@ type Config struct {
 }
 
 func defaultConfigPath() string {
+	return defaultConfigPathFor(runtime.GOOS)
+}
+
+// defaultConfigPathFor is $XDG_CONFIG_HOME/tcpview/config.json if set,
+// else ~/.config/tcpview/config.json - except on Windows, where it's
+// %AppData%\tcpview\config.json, the native per-user config location.
+func defaultConfigPathFor(goos string) string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "tcpview", "config.json")
+	}
+	if goos == "windows" {
+		if dir, err := os.UserConfigDir(); err == nil {
+			return filepath.Join(dir, "tcpview", "config.json")
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

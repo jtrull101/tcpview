@@ -14,6 +14,7 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
   - [Packet detail, down to the bytes](#packet-detail-down-to-the-bytes)
   - [Full keybinding reference, always one keypress away](#full-keybinding-reference-always-one-keypress-away)
 - [Installing a release binary](#installing-a-release-binary)
+  - [Windows](#windows)
 - [Building](#building)
 - [Running](#running)
   - [Remote capture](#remote-capture)
@@ -98,11 +99,19 @@ This is the feature a plain `tcpdump`/Wireshark live-capture session can't give 
 curl -sSL https://raw.githubusercontent.com/jtrull101/tcpview/main/install.sh | sh
 ```
 
-Detects your OS/arch, downloads the matching asset from the [latest release](https://github.com/jtrull101/tcpview/releases), and installs it to `~/.local/bin/tcpview` (override with `INSTALL_DIR=/somewhere sh install.sh`; pin a version with `VERSION=v0.1.0 sh install.sh`). Prebuilt binaries cover linux/amd64, linux/arm64, darwin/amd64, and darwin/arm64. The script checks the download against the release's `SHA256SUMS` and refuses to install on a mismatch.
+Detects your OS/arch, downloads the matching asset from the [latest release](https://github.com/jtrull101/tcpview/releases), and installs it to `~/.local/bin/tcpview` (override with `INSTALL_DIR=/somewhere sh install.sh`; pin a version with `VERSION=v0.1.0 sh install.sh`). Prebuilt binaries cover linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64 (see [Windows](#windows) below; the script is for Linux and macOS). The script checks the download against the release's `SHA256SUMS` and refuses to install on a mismatch.
 
 The Linux binaries link libpcap statically (a minimal build, see `.github/libpcap/build.sh`), so they run on any glibc distro regardless of which libpcap soname it ships. They leave out libpcap's Bluetooth, D-Bus, USB and RDMA capture backends, so those pseudo-interfaces don't appear in the picker; build from source (below) if you need them.
 
 Releases before static linking were built against Ubuntu's legacy `libpcap.so.0.8` soname and fail to launch on distros that only ship `libpcap.so.1` (e.g. Arch). The install script detects that and prints the fix (`sudo ln -s /usr/lib/libpcap.so.1 /usr/lib/libpcap.so.0.8`).
+
+### Windows
+
+1. Install [Npcap](https://npcap.com/#download), the Windows packet capture driver. tcpview needs it for live capture but can't bundle it: Npcap's free license doesn't allow redistribution. Without it, tcpview exits with a message pointing here.
+2. Download `tcpview-<version>-windows-amd64.zip` from the [latest release](https://github.com/jtrull101/tcpview/releases/latest), check it against the release's `SHA256SUMS` if you like (`Get-FileHash tcpview-*.zip` in PowerShell), and unzip it anywhere.
+3. Run `tcpview.exe` in Windows Terminal or PowerShell.
+
+Windows names adapters by device path (`\Device\NPF_{…}`), so the picker and header show each adapter's description instead ("Intel(R) Ethernet Connection …"). Capture runs as a normal user unless Npcap was installed with "Restrict Npcap driver's access to Administrators only", in which case run tcpview as Administrator. Remote capture (`-remote`) works with the OpenSSH client built into Windows 10 and later. The config file lives at `%AppData%\tcpview\config.json`.
 
 ## Building
 
@@ -193,7 +202,7 @@ The archive rotates files by age/size and deletes the oldest ones first once the
 
 ### Config file
 
-Flags above can also live in an optional JSON config file, checked by default at `$XDG_CONFIG_HOME/tcpview/config.json` (or `~/.config/tcpview/config.json`), overridable with `-config path`:
+Flags above can also live in an optional JSON config file, checked by default at `$XDG_CONFIG_HOME/tcpview/config.json` (or `~/.config/tcpview/config.json`; `%AppData%\tcpview\config.json` on Windows), overridable with `-config path`:
 
 ```json
 {
@@ -217,8 +226,8 @@ Every parser-like function (filter expressions, packet decoding, archive file pa
 
 ### CI / releases
 
-- `.github/workflows/ci.yml` runs on every push/PR: build, `gofmt` check, `go vet`, `golangci-lint`, race-enabled tests, coverage gates (`scripts/coverage-gate.sh`: 90% aggregate, 85% per `internal/` package, 75% for the root package), `govulncheck`, and a fuzz smoke pass on Linux; race-enabled tests on macOS; and the release's static-libpcap Linux build, so a break there shows up before a tag does.
-- `.github/workflows/release.yml` runs on any `vX.Y.Z` tag push: builds native binaries for linux/amd64, linux/arm64, darwin/amd64, and darwin/arm64, and publishes them as a GitHub Release with a `SHA256SUMS` file.
+- `.github/workflows/ci.yml` runs on every push/PR: build, `gofmt` check, `go vet`, `golangci-lint`, race-enabled tests, coverage gates (`scripts/coverage-gate.sh`: 90% aggregate, 85% per `internal/` package, 75% for the root package), `govulncheck`, and a fuzz smoke pass on Linux; race-enabled tests on macOS; tests on Windows (without real capture, since CI runners can't have Npcap); and the release's static-libpcap Linux build, so a break there shows up before a tag does.
+- `.github/workflows/release.yml` runs on any `vX.Y.Z` tag push: builds native binaries for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64, and publishes them as a GitHub Release with a `SHA256SUMS` file.
 - `.github/dependabot.yml` opens weekly update PRs for Go modules and the Actions the workflows use.
 
 ## License
