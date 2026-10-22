@@ -74,6 +74,7 @@ func TestModel_RewindShowsArchivedPacketsOutsideRingWindow(t *testing.T) {
 	}
 
 	m.timeline = timelineState{active: true, at: old.Time}
+	m = loadRewindWindow(t, m)
 	pkts := m.packetsForDisplay()
 	found := false
 	for _, p := range pkts {
@@ -531,5 +532,180 @@ func TestModel_Stress_RapidAlternatingScrubAgainstRealData(t *testing.T) {
 			m = mUpdated.(Model)
 			_ = m.View()
 		}()
+	}
+}
+
+// loadRewindWindow runs the archive load rewindMoved starts for m's
+// current rewind point and delivers its result, the way Bubble Tea would.
+func loadRewindWindow(t *testing.T, m Model) Model {
+	t.Helper()
+	cmd := m.rewindMoved()
+	if cmd == nil {
+		t.Fatal("rewindMoved started no archive load")
+	}
+	mUpdated, _ := m.Update(cmd())
+	return mUpdated.(Model)
+}
+
+func oldArchivedPacket(t *testing.T, m Model, ago time.Duration, port int) store.Packet {
+	t.Helper()
+	p := samplePacket(port)
+	p.Time = time.Now().Add(-ago)
+	if err := m.archive.Write(p); err != nil {
+		t.Fatalf("archive.Write error: %v", err)
+	}
+	return p
+}
+
+func TestRewind_ArchiveLoadsInBackgroundNotOnEveryRedraw(t *testing.T) {
+	t.Parallel()
+	m, dir := newArchivedModel(t)
+	old := oldArchivedPacket(t, m, 10*time.Second, 1)
+
+	m, cmd := update(t, m, keyMsg("left"))
+	if cmd == nil {
+		t.Fatal("left with an archive enabled started no background load")
+	}
+	if len(m.displayed) != 0 {
+		t.Fatal("archived packet shown before its load finished - the read happened on the Update goroutine")
+	}
+	m, _ = update(t, m, cmd())
+	if len(m.displayed) != 1 || !m.displayed[0].Time.Equal(old.Time) {
+		t.Fatalf("displayed %d packets after the load, want the archived one", len(m.displayed))
+	}
+
+	// Wipe the archive: redraws while rewound must keep using the cache
+	// rather than re-reading the disk every tick.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	m.dirty = true
+	m, _ = update(t, m, tickMsg(time.Now()))
+	if len(m.displayed) != 1 {
+		t.Fatal("redraw re-read the archive instead of using the cached window")
+	}
+}
+
+func TestRewind_StaleArchiveLoadDropped(t *testing.T) {
+	t.Parallel()
+	m, _ := newArchivedModel(t)
+	oldArchivedPacket(t, m, 10*time.Second, 1)
+
+	m, first := update(t, m, keyMsg("left"))
+	m, _ = update(t, m, keyMsg("left")) // scrub on before the first load lands
+	m, _ = update(t, m, first())
+	if !m.rewindArchiveAt.IsZero() {
+		t.Fatal("a load for a rewind point the user already left was applied")
+	}
+
+	m, _ = update(t, m, keyMsg("L"))
+	if m.rewindArchive != nil {
+		t.Fatal("jumping to live kept the rewind cache")
+	}
+}
+
+func TestRewind_EvictedPacketsStayVisibleInLoadedWindow(t *testing.T) {
+	t.Parallel()
+	m, _ := newArchivedModel(t)
+	for i := 0; i < ringCapacity; i++ {
+		m, _ = update(t, m, packetMsg(samplePacket(i)))
+	}
+	m.timeline = timelineState{active: true, at: time.Now()}
+	m = loadRewindWindow(t, m)
+	before := len(m.packetsForDisplay())
+
+	// Fresh packets push the window's oldest out of the ring into the archive.
+	for i := 0; i < 50; i++ {
+		p := samplePacket(i)
+		p.Time = time.Now().Add(time.Hour) // outside the window
+		m, _ = update(t, m, packetMsg(p))
+	}
+	if after := len(m.packetsForDisplay()); after != before {
+		t.Fatalf("window shows %d packets after evictions, had %d - evicted ones vanished", after, before)
+	}
+}
+
+func TestRewind_CorruptArchiveWarnsButStillShowsGoodPackets(t *testing.T) {
+	t.Parallel()
+	m, dir := newArchivedModel(t)
+	old := oldArchivedPacket(t, m, 10*time.Second, 1)
+	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("archive files = %v (%v), want 1", files, err)
+	}
+	f, err := os.OpenFile(files[0], os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open archive file: %v", err)
+	}
+	_, _ = f.WriteString("{\"Time\":\"2026-01-01T00:0\n")
+	f.Close()
+
+	m, cmd := update(t, m, keyMsg("left"))
+	m, _ = update(t, m, cmd())
+	if len(m.displayed) != 1 || !m.displayed[0].Time.Equal(old.Time) {
+		t.Fatalf("displayed %d packets, want the good archived one despite the corrupt line", len(m.displayed))
+	}
+	if !strings.Contains(m.View(), "1 corrupt archive line") || m.err != nil {
+		t.Fatalf("View() = %q (err %v), want a corruption warning, not an error", m.View(), m.err)
+	}
+}
+
+func TestRewind_ArchiveReadErrorSurfaced(t *testing.T) {
+	t.Parallel()
+	m := NewModelWithSource("eth0", newFakeSource())
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.archiveReader = store.NewArchiveReader(file)
+	m, cmd := update(t, m, keyMsg("left"))
+	m, _ = update(t, m, cmd())
+	if m.err == nil || !strings.Contains(m.err.Error(), "rewind: read archive") {
+		t.Fatalf("err = %v, want the archive read failure surfaced", m.err)
+	}
+}
+
+func TestRewind_Chaos_ScrubbingWithLoadsArrivingOutOfOrder(t *testing.T) {
+	t.Parallel()
+	m, _ := newArchivedModel(t)
+	for i := 0; i < 30; i++ {
+		oldArchivedPacket(t, m, time.Duration(i)*10*time.Second, i)
+	}
+	var loads []tea.Cmd
+	keys := []string{"left", "left", "right", "left", "L", "left", "left"}
+	for i := 0; i < 70; i++ {
+		var cmd tea.Cmd
+		m, cmd = update(t, m, keyMsg(keys[i%len(keys)]))
+		if cmd != nil {
+			loads = append(loads, cmd)
+		}
+	}
+	// Deliver every load, newest first, then verify only the current one stuck.
+	for i := len(loads) - 1; i >= 0; i-- {
+		m, _ = update(t, m, loads[i]())
+	}
+	if m.timeline.active && !m.rewindArchiveAt.IsZero() && !m.rewindArchiveAt.Equal(m.timeline.at) {
+		t.Fatalf("cache loaded for %v while rewound to %v", m.rewindArchiveAt, m.timeline.at)
+	}
+	_ = m.View()
+}
+
+func TestModel_ExportWarnsWhenMixingLinkTypes(t *testing.T) {
+	t.Parallel()
+	m := NewModelWithSource("eth0", newFakeSource())
+	m.SetExportDir(t.TempDir())
+	for i, lt := range []uint16{1, 113} { // Ethernet, then Linux cooked ("any")
+		p := samplePacket(i)
+		p.Raw, p.LinkType, p.HasLinkType = []byte("frame"), lt, true
+		m, _ = update(t, m, packetMsg(p))
+	}
+	m, _ = update(t, m, tickMsg(time.Now()))
+	m, _ = update(t, m, keyMsg("e"))
+	if !strings.Contains(m.status, "exported 2 packet") || !strings.Contains(m.status, "mixes 2 link types") {
+		t.Fatalf("status = %q, want the export count and a mixed-link-type warning", m.status)
+	}
+	entries, _ := os.ReadDir(m.exportDir)
+	if len(entries) != 1 || !strings.HasSuffix(entries[0].Name(), ".pcapng") {
+		t.Fatalf("export dir = %v, want one .pcapng file", entries)
 	}
 }
