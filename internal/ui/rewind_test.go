@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -559,7 +560,7 @@ func oldArchivedPacket(t *testing.T, m Model, ago time.Duration, port int) store
 
 func TestRewind_ArchiveLoadsInBackgroundNotOnEveryRedraw(t *testing.T) {
 	t.Parallel()
-	m, dir := newArchivedModel(t)
+	m, _ := newArchivedModel(t)
 	old := oldArchivedPacket(t, m, 10*time.Second, 1)
 
 	m, cmd := update(t, m, keyMsg("left"))
@@ -574,11 +575,11 @@ func TestRewind_ArchiveLoadsInBackgroundNotOnEveryRedraw(t *testing.T) {
 		t.Fatalf("displayed %d packets after the load, want the archived one", len(m.displayed))
 	}
 
-	// Wipe the archive: redraws while rewound must keep using the cache
-	// rather than re-reading the disk every tick.
-	if err := os.RemoveAll(dir); err != nil {
-		t.Fatalf("RemoveAll: %v", err)
-	}
+	// Point the reader at an empty archive: redraws while rewound must
+	// keep using the cache rather than re-reading the disk every tick.
+	// (Swapped rather than deleted - Windows can't delete the file the
+	// archive writer still holds open.)
+	m.archiveReader = store.NewArchiveReader(t.TempDir())
 	m.dirty = true
 	m, _ = update(t, m, tickMsg(time.Now()))
 	if len(m.displayed) != 1 {
@@ -653,14 +654,16 @@ func TestRewind_CorruptArchiveWarnsButStillShowsGoodPackets(t *testing.T) {
 func TestRewind_ArchiveReadErrorSurfaced(t *testing.T) {
 	t.Parallel()
 	m := NewModelWithSource("eth0", newFakeSource())
-	file := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(file, nil, 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	m.archiveReader = store.NewArchiveReader(file)
+	m.archiveReader = store.NewArchiveReader(t.TempDir())
 	m, cmd := update(t, m, keyMsg("left"))
-	m, _ = update(t, m, cmd())
-	if m.err == nil || !strings.Contains(m.err.Error(), "rewind: read archive") {
+	if cmd == nil {
+		t.Fatal("left started no archive load")
+	}
+	// Deliver a failed load directly: how the store's errors arise is
+	// platform-specific (and tested in store); this is about the UI
+	// surfacing one rather than dropping it.
+	m, _ = update(t, m, archiveWindowMsg{at: m.timeline.at, err: errors.New("disk on fire")})
+	if m.err == nil || !strings.Contains(m.err.Error(), "rewind: read archive: disk on fire") {
 		t.Fatalf("err = %v, want the archive read failure surfaced", m.err)
 	}
 }

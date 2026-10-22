@@ -60,18 +60,18 @@ func buildPcapFile(t *testing.T, n int) string {
 }
 
 func catFactory(path string) func() *exec.Cmd {
-	return func() *exec.Cmd { return exec.Command("cat", path) }
+	return func() *exec.Cmd { return helperCmd("cat", path) }
 }
 
 func failFactory() func() *exec.Cmd {
-	return func() *exec.Cmd { return exec.Command("false") }
+	return func() *exec.Cmd { return helperCmd("fail") }
 }
 
 // sleepyFactory simulates a remote session that writes nothing further and
 // never exits on its own - the only way to end it is to kill the process,
 // exactly like a stalled/hung SSH connection.
 func sleepyFactory() func() *exec.Cmd {
-	return func() *exec.Cmd { return exec.Command("sleep", "300") }
+	return func() *exec.Cmd { return helperCmd("hang") }
 }
 
 func collectPackets(t *testing.T, s *SSH, want int, timeout time.Duration) int {
@@ -170,7 +170,7 @@ func TestSSH_CommandFailureIncludesRemoteStderr(t *testing.T) {
 	s, err := New(Options{
 		Host: "fake-host", Iface: "eth0",
 		cmdFactory: func() *exec.Cmd {
-			return exec.Command("sh", "-c", "echo 'tcpdump: eth0: permission denied' 1>&2; exit 1")
+			return helperCmd("script", "", "tcpdump: eth0: permission denied\n", "1")
 		},
 		Backoff: time.Hour, MaxBackoff: time.Hour, // only need the first attempt
 	})
@@ -305,9 +305,9 @@ func TestSSH_Chaos_ReconnectsAfterMidStreamDrop(t *testing.T) {
 	factory := func() *exec.Cmd {
 		calls++
 		if calls == 1 {
-			return exec.Command("cat", truncatedPath)
+			return helperCmd("cat", truncatedPath)
 		}
-		return exec.Command("cat", full)
+		return helperCmd("cat", full)
 	}
 
 	s, err := New(Options{

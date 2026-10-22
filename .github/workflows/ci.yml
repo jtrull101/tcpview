@@ -105,6 +105,36 @@ jobs:
       - name: Test (race)
         run: go test ./... -race
 
+  test-windows:
+    # Release builds a Windows binary too. GitHub's Windows runners can't
+    # have Npcap (its free edition has no unattended install), so tests
+    # needing real capture skip and the missing-Npcap error path is
+    # tested instead; everything else runs for real.
+    name: test (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0" # same as the release build; see release.yml
+        run: go build -o tcpview.exe .
+
+      - name: Test
+        # Without -race: the race detector needs cgo, and this matches
+        # the release's cgo-free Windows build. Linux and macOS run the
+        # suite with -race.
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./...
+
   static-build:
     # Exercises the release's Linux build path (static libpcap, see
     # .github/libpcap/build.sh) on every change, not just at release time.

@@ -369,7 +369,7 @@ func (m *Model) switchInterface(delta int) tea.Cmd {
 	n := len(m.ifaces)
 	m.cursor = ((m.cursor+delta)%n + n) % n
 	name := m.ifaces[m.cursor].Name
-	m.label = m.ifaceLabel(name)
+	m.label = m.ifaceLabel(m.ifaces[m.cursor].DisplayName())
 	m.err = nil
 	m.status = fmt.Sprintf("opening %s...", m.label)
 
@@ -539,7 +539,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			name := m.ifaces[m.cursor].Name
-			m.label = m.ifaceLabel(name)
+			m.label = m.ifaceLabel(m.ifaces[m.cursor].DisplayName())
 			m.openGen++
 			return m, openSource(m.open, name, m.openGen)
 		}
@@ -730,6 +730,20 @@ const helpText = `tcpview - keybindings
 press any key to close this help
 `
 
+// pickerNameWidth sizes the picker's name column to its longest name (so
+// e.g. "bluetooth-monitor" doesn't push its description out of line),
+// capped so one long name can't push every description off screen.
+func pickerNameWidth(ifaces []capture.Interface) int {
+	const maxWidth = 24
+	width := 0
+	for _, iface := range ifaces {
+		if n := len([]rune(iface.DisplayName())); n > width && iface.Description != iface.DisplayName() {
+			width = n
+		}
+	}
+	return min(width, maxWidth)
+}
+
 func (m Model) viewPicker() string {
 	var b strings.Builder
 	if m.host != "" {
@@ -740,16 +754,22 @@ func (m Model) viewPicker() string {
 	if len(m.ifaces) == 0 {
 		b.WriteString("  (no interfaces found)\n")
 	}
+	width := pickerNameWidth(m.ifaces)
 	for i, iface := range m.ifaces {
 		cursor := "  "
 		if i == m.cursor {
 			cursor = "> "
 		}
-		desc := iface.Description
-		if desc == "" {
-			desc = "-"
+		name := iface.DisplayName()
+		switch iface.Description {
+		case name:
+			// Already shown as the name (Windows adapters).
+			fmt.Fprintf(&b, "%s%s\n", cursor, name)
+		case "":
+			fmt.Fprintf(&b, "%s%-*s -\n", cursor, width, name)
+		default:
+			fmt.Fprintf(&b, "%s%-*s %s\n", cursor, width, name, iface.Description)
 		}
-		fmt.Fprintf(&b, "%s%-14s %s\n", cursor, iface.Name, desc)
 	}
 	b.WriteString("\n↑/↓ move  enter select  q quit\n")
 	if m.err != nil {

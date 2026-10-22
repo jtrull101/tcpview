@@ -42,9 +42,9 @@ func withStubs(t *testing.T, teaErr error, privErr error, fn func(captured *tea.
 	stubMu.Lock()
 	defer stubMu.Unlock()
 
-	origTea, origPriv, origRemote, origList, origArchive := runTeaProgram, checkCapturePrivilegesFn, newRemoteSource, listRemoteInterfaces, newArchiveFn
+	origTea, origPriv, origRemote, origList, origLocalList, origArchive := runTeaProgram, checkCapturePrivilegesFn, newRemoteSource, listRemoteInterfaces, listLocalInterfaces, newArchiveFn
 	defer func() {
-		runTeaProgram, checkCapturePrivilegesFn, newRemoteSource, listRemoteInterfaces, newArchiveFn = origTea, origPriv, origRemote, origList, origArchive
+		runTeaProgram, checkCapturePrivilegesFn, newRemoteSource, listRemoteInterfaces, listLocalInterfaces, newArchiveFn = origTea, origPriv, origRemote, origList, origLocalList, origArchive
 	}()
 
 	var captured tea.Model
@@ -56,6 +56,9 @@ func withStubs(t *testing.T, teaErr error, privErr error, fn func(captured *tea.
 	newRemoteSource = func(remote.Options) (capture.Source, error) { return newNoopSource(), nil }
 	listRemoteInterfaces = func(remote.Options) ([]capture.Interface, error) {
 		return []capture.Interface{{Name: "eth0"}, {Name: "eth1"}}, nil
+	}
+	listLocalInterfaces = func() ([]capture.Interface, error) {
+		return []capture.Interface{{Name: "lo"}, {Name: "eth0"}}, nil
 	}
 	// Never let a test touch the real default archive dir (~/.cache/...) -
 	// redirect to a throwaway temp dir instead.
@@ -133,10 +136,13 @@ func TestRun_NoArchiveFlagSkipsArchiveSetup(t *testing.T) {
 	t.Parallel()
 	stubMu.Lock()
 	defer stubMu.Unlock()
-	origTea, origPriv, origArchive := runTeaProgram, checkCapturePrivilegesFn, newArchiveFn
-	defer func() { runTeaProgram, checkCapturePrivilegesFn, newArchiveFn = origTea, origPriv, origArchive }()
+	origTea, origPriv, origArchive, origLocalList := runTeaProgram, checkCapturePrivilegesFn, newArchiveFn, listLocalInterfaces
+	defer func() {
+		runTeaProgram, checkCapturePrivilegesFn, newArchiveFn, listLocalInterfaces = origTea, origPriv, origArchive, origLocalList
+	}()
 
 	checkCapturePrivilegesFn = func() error { return nil }
+	listLocalInterfaces = func() ([]capture.Interface, error) { return []capture.Interface{{Name: "lo"}}, nil }
 	archiveCalled := false
 	newArchiveFn = func(store.ArchiveOptions) (*store.Archive, error) {
 		archiveCalled = true
@@ -232,10 +238,13 @@ func TestRun_ArchiveSetupErrorSkipsTea(t *testing.T) {
 	t.Parallel()
 	stubMu.Lock()
 	defer stubMu.Unlock()
-	origTea, origPriv, origArchive := runTeaProgram, checkCapturePrivilegesFn, newArchiveFn
-	defer func() { runTeaProgram, checkCapturePrivilegesFn, newArchiveFn = origTea, origPriv, origArchive }()
+	origTea, origPriv, origArchive, origLocalList := runTeaProgram, checkCapturePrivilegesFn, newArchiveFn, listLocalInterfaces
+	defer func() {
+		runTeaProgram, checkCapturePrivilegesFn, newArchiveFn, listLocalInterfaces = origTea, origPriv, origArchive, origLocalList
+	}()
 
 	checkCapturePrivilegesFn = func() error { return nil }
+	listLocalInterfaces = func() ([]capture.Interface, error) { return []capture.Interface{{Name: "lo"}}, nil }
 	called := false
 	runTeaProgram = func(tea.Model) error { called = true; return nil }
 	newArchiveFn = func(store.ArchiveOptions) (*store.Archive, error) {
@@ -324,6 +333,30 @@ func TestRun_LocalMode_PrivilegeCheckFailureSkipsTea(t *testing.T) {
 		}
 		if *captured != nil {
 			t.Fatal("runTeaProgram was called despite a privilege check failure")
+		}
+	})
+}
+
+func TestRun_LocalMode_MissingNpcapFailsWithInstallHint(t *testing.T) {
+	t.Parallel()
+	withStubs(t, nil, nil, func(captured *tea.Model) {
+		listLocalInterfaces = func() ([]capture.Interface, error) {
+			return nil, fmt.Errorf("%w (couldn't load wpcap.dll)", capture.ErrNpcapMissing)
+		}
+		out, err := os.CreateTemp(t.TempDir(), "stderr")
+		if err != nil {
+			t.Fatalf("CreateTemp: %v", err)
+		}
+		defer out.Close()
+		if code := run(nil, out); code != 1 {
+			t.Fatalf("run() = %d, want 1 without Npcap", code)
+		}
+		if *captured != nil {
+			t.Fatal("runTeaProgram was called with no way to capture")
+		}
+		b, _ := os.ReadFile(out.Name())
+		if !strings.Contains(string(b), "https://npcap.com") {
+			t.Fatalf("stderr = %q, want the Npcap install link", b)
 		}
 	})
 }

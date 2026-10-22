@@ -15,6 +15,11 @@ os() {
 	case "$(uname -s)" in
 	Linux) echo linux ;;
 	Darwin) echo darwin ;;
+	MINGW* | MSYS* | CYGWIN*)
+		echo "tcpview: on Windows, download tcpview-<version>-windows-amd64.zip from" >&2
+		echo "  https://github.com/${REPO}/releases/latest and install Npcap (https://npcap.com/#download)" >&2
+		exit 1
+		;;
 	*)
 		echo "tcpview: unsupported OS $(uname -s) - no prebuilt binary, build from source instead" >&2
 		exit 1

@@ -15,16 +15,12 @@ import (
 // errOut to stderr), then exiting with code.
 func listFactory(t *testing.T, out, errOut string, code int) func() *exec.Cmd {
 	t.Helper()
-	dir := t.TempDir()
-	outPath, errPath := filepath.Join(dir, "out"), filepath.Join(dir, "err")
+	outPath := filepath.Join(t.TempDir(), "out")
 	if err := os.WriteFile(outPath, []byte(out), 0o600); err != nil {
 		t.Fatalf("write fake stdout: %v", err)
 	}
-	if err := os.WriteFile(errPath, []byte(errOut), 0o600); err != nil {
-		t.Fatalf("write fake stderr: %v", err)
-	}
 	return func() *exec.Cmd {
-		return exec.Command("sh", "-c", fmt.Sprintf("cat %q; cat %q >&2; exit %d", outPath, errPath, code))
+		return helperCmd("script", outPath, errOut, fmt.Sprint(code))
 	}
 }
 
@@ -74,6 +70,21 @@ func TestListInterfaces_ParsesRemoteOutput(t *testing.T) {
 	}
 	if len(got) != 5 || got[1].Name != "any" {
 		t.Fatalf("ListInterfaces = %+v, want the 5 parsed interfaces", got)
+	}
+}
+
+func TestBuildCmd_RunsCaptureScriptOverSSH(t *testing.T) {
+	t.Parallel()
+	o := Options{Host: "user@box", Iface: "eth0"}.withDefaults()
+	cmd := o.buildCmd()
+	if filepath.Base(cmd.Path) != "ssh" && cmd.Args[0] != "ssh" {
+		t.Fatalf("capture runs %q, want ssh", cmd.Path)
+	}
+	if got, want := strings.Join(cmd.Args[1:], " "), strings.Join(o.captureArgs(), " "); got != want {
+		t.Fatalf("ssh args = %q, want captureArgs %q", got, want)
+	}
+	if cmd.Args[1] != "user@box" || cmd.Args[2] != "sh" {
+		t.Fatalf("ssh args = %q, want the host then an explicit sh", cmd.Args[1:])
 	}
 }
 

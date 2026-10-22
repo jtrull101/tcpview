@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -218,6 +219,9 @@ func TestArchive_RotateFailureSurfacesFromWrite(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root - permission denial doesn't apply")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows doesn't enforce Unix permission bits, so chmod can't make this fail")
+	}
 	dir := t.TempDir()
 	a, err := NewArchive(ArchiveOptions{Dir: dir})
 	if err != nil {
@@ -371,6 +375,9 @@ func TestArchive_TotalBytes_PropagatesListError(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root - permission denial doesn't apply")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows doesn't enforce Unix permission bits, so chmod can't make this fail")
+	}
 	dir := t.TempDir()
 	a, err := NewArchive(ArchiveOptions{Dir: dir})
 	if err != nil {
@@ -390,6 +397,9 @@ func TestArchiveReader_Range_PropagatesListError(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("running as root - permission denial doesn't apply")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows doesn't enforce Unix permission bits, so chmod can't make this fail")
 	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o000); err != nil {

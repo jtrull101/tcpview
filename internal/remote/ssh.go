@@ -106,11 +106,16 @@ func (o Options) buildCmd() *exec.Cmd {
 	if o.cmdFactory != nil {
 		return o.cmdFactory()
 	}
-	// ssh joins its arguments with spaces and hands the result to the
-	// remote user's login shell, which may not be POSIX (fish, csh), so
-	// the script runs under an explicit sh with every value passed as a
-	// single-quoted positional argument rather than spliced into it.
-	return exec.Command(o.SSHBinary, o.Host, "sh", "-c", shellQuote(captureScript), "tcpview", shellQuote(o.Iface), shellQuote(o.TcpdumpPath))
+	return exec.Command(o.SSHBinary, o.captureArgs()...)
+}
+
+// captureArgs is the ssh argument list for a capture: the host, then the
+// remote command. ssh joins the command's words with spaces and hands the
+// result to the remote user's login shell, which may not be POSIX (fish,
+// csh), so the script runs under an explicit sh with every value passed
+// as a single-quoted positional argument rather than spliced into it.
+func (o Options) captureArgs() []string {
+	return []string{o.Host, "sh", "-c", shellQuote(captureScript), "tcpview", shellQuote(o.Iface), shellQuote(o.TcpdumpPath)}
 }
 
 // shellQuote single-quotes s for a remote shell, the portable way:
