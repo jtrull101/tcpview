@@ -27,7 +27,13 @@ jobs:
           - os: macos-14
             goos: darwin
             goarch: arm64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash # Git Bash on Windows, so one set of steps serves every OS
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,11 +64,13 @@ jobs:
 
       - name: Build
         env:
-          CGO_ENABLED: "1"
+          # gopacket's Windows backend loads Npcap's wpcap.dll at runtime
+          # instead of linking libpcap, so Windows needs no C toolchain.
+          CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
         run: |
           mkdir -p dist
           go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" \
-            -o dist/tcpview .
+            -o "dist/tcpview${{ runner.os == 'Windows' && '.exe' || '' }}" .
 
       - name: Check libpcap is linked statically (Linux)
         if: runner.os == 'Linux'
@@ -76,14 +84,20 @@ jobs:
         run: |
           name="tcpview-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p "pkg/${name}"
-          cp dist/tcpview README.md LICENSE "pkg/${name}/"
-          tar -C pkg -czf "${name}.tar.gz" "${name}"
+          cp dist/tcpview* README.md LICENSE "pkg/${name}/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            (cd pkg && 7z a -tzip "../${name}.zip" "${name}" >/dev/null)
+          else
+            tar -C pkg -czf "${name}.tar.gz" "${name}"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: tcpview-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: "*.tar.gz"
+          path: |
+            *.tar.gz
+            *.zip
           if-no-files-found: error
 
   release:
@@ -102,7 +116,7 @@ jobs:
 
       - name: Checksums
         # install.sh verifies downloads against this file.
-        run: cd artifacts && sha256sum *.tar.gz | tee SHA256SUMS
+        run: cd artifacts && sha256sum *.tar.gz *.zip | tee SHA256SUMS
 
       - name: Create release
         env:
@@ -111,4 +125,4 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
-            artifacts/*.tar.gz artifacts/SHA256SUMS
+            artifacts/*.tar.gz artifacts/*.zip artifacts/SHA256SUMS

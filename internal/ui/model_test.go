@@ -533,3 +533,66 @@ func TestModel_WideTerminalShowsFullIPv6Endpoint(t *testing.T) {
 		t.Fatalf("View() = %q, want the full bracketed IPv6 endpoint", out)
 	}
 }
+
+func TestPicker_WindowsAdaptersShownByDescription(t *testing.T) {
+	t.Parallel()
+	var opened []string
+	ifaces := []capture.Interface{
+		{Name: `\Device\NPF_{4A1C2B3D-0000-1111-2222-333344445555}`, Description: "Intel(R) Ethernet Connection I219-V"},
+		{Name: `\Device\NPF_Loopback`, Description: "Adapter for loopback traffic capture"},
+	}
+	m := NewModel(ifaces, func(name string) (capture.Source, error) {
+		opened = append(opened, name)
+		return newFakeSource(), nil
+	})
+	out := m.View()
+	if strings.Contains(out, "NPF_") {
+		t.Fatalf("picker shows raw Npcap device paths:\n%s", out)
+	}
+	if !strings.Contains(out, "> Intel(R) Ethernet Connection I219-V\n") {
+		t.Fatalf("picker = %q, want the adapter's description as its name, shown once", out)
+	}
+
+	m, cmd := update(t, m, keyMsg("enter"))
+	m, _ = update(t, m, cmd())
+	if len(opened) != 1 || opened[0] != ifaces[0].Name {
+		t.Fatalf("opened %q, want the device path %q - capture needs the real name", opened, ifaces[0].Name)
+	}
+	if !strings.Contains(m.View(), "live: Intel(R) Ethernet Connection I219-V [1/2") {
+		t.Fatalf("live header = %q, want the description", strings.SplitN(m.View(), "\n", 2)[0])
+	}
+}
+
+func TestPicker_NameColumnFitsLongestName(t *testing.T) {
+	t.Parallel()
+	m := NewModel([]capture.Interface{
+		{Name: "eth0"},
+		{Name: "bluetooth-monitor", Description: "Bluetooth Linux Monitor"},
+		{Name: "nflog", Description: "Linux netfilter log (NFLOG) interface"},
+	}, nil)
+	// Each row's second column starts right after the longest name
+	// ("bluetooth-monitor", 17 chars) plus the 2-char cursor and a space.
+	const descCol = 2 + 17 + 1
+	for _, want := range []string{"-", "Bluetooth Linux Monitor", "Linux netfilter"} {
+		found := false
+		for _, line := range strings.Split(m.View(), "\n") {
+			if len(line) > descCol && strings.HasPrefix(line[descCol:], want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("no row has %q at column %d:\n%s", want, descCol, m.View())
+		}
+	}
+}
+
+func TestPickerNameWidth_CappedForPathologicalNames(t *testing.T) {
+	t.Parallel()
+	long := capture.Interface{Name: strings.Repeat("x", 500), Description: "d"}
+	if w := pickerNameWidth([]capture.Interface{long}); w != 24 {
+		t.Fatalf("pickerNameWidth = %d, want the 24-column cap", w)
+	}
+	if w := pickerNameWidth(nil); w != 0 {
+		t.Fatalf("pickerNameWidth(nil) = %d, want 0", w)
+	}
+}

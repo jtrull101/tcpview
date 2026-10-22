@@ -4,6 +4,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -97,6 +99,9 @@ func TestLoadConfig_UnreadableFileErrors(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("running as root - permission denial doesn't apply")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows doesn't enforce Unix permission bits, so chmod can't make this fail")
 	}
 	path := filepath.Join(t.TempDir(), "secret.json")
 	if err := os.WriteFile(path, []byte("{}"), 0o000); err != nil {
@@ -202,4 +207,43 @@ func TestMergeArchiveConfig_Chaos_NilNoArchivePointerNeverPanics(t *testing.T) {
 		}()
 		_ = mergeArchiveConfig(defaults, map[string]bool{}, cfg)
 	}()
+}
+
+// Not parallel: t.Setenv changes process-wide environment, which Go
+// refuses to combine with t.Parallel.
+func TestDefaultConfigPathFor_WindowsUsesAppData(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("AppData", `C:\Users\me\AppData\Roaming`) // what os.UserConfigDir reads on Windows
+	got := defaultConfigPathFor("windows")
+	if !strings.HasSuffix(got, filepath.Join("tcpview", "config.json")) {
+		t.Fatalf("defaultConfigPathFor(windows) = %q, want .../tcpview/config.json", got)
+	}
+	if runtime.GOOS == "windows" && !strings.HasPrefix(got, `C:\Users\me\AppData\Roaming`) {
+		t.Fatalf("defaultConfigPathFor(windows) = %q, want it under %%AppData%%", got)
+	}
+}
+
+// Not parallel: see above.
+func TestDefaultConfigPathFor_XDGWinsEverywhere(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		if got := defaultConfigPathFor(goos); got != filepath.Join(dir, "tcpview", "config.json") {
+			t.Errorf("defaultConfigPathFor(%s) = %q, want it under $XDG_CONFIG_HOME", goos, got)
+		}
+	}
+}
+
+// Not parallel: see above.
+func TestDefaultConfigPathFor_UnixUsesDotConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if got := defaultConfigPathFor(goos); got != filepath.Join(home, ".config", "tcpview", "config.json") {
+			t.Errorf("defaultConfigPathFor(%s) = %q, want ~/.config/tcpview/config.json", goos, got)
+		}
+	}
 }

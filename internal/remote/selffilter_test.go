@@ -10,23 +10,26 @@ import (
 	"time"
 )
 
-// fakeSSH writes an "ssh" stand-in that behaves like the real client as
-// far as the remote command goes: it drops the host argument, joins the
-// rest with spaces, and runs that through a shell - with SSH_CONNECTION
-// set the way sshd sets it (empty conn leaves it unset). It returns the
-// script's path.
-func fakeSSH(t *testing.T, conn string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "ssh")
-	env := ""
-	if conn != "" {
-		env = fmt.Sprintf("SSH_CONNECTION=%q ", conn)
+// viaFakeSSH returns a cmdFactory that runs opts' real capture argument
+// list (captureArgs, exactly what production hands the ssh binary)
+// through a fake ssh client that does what the real one does with it -
+// joins the remote command's words and runs them under sh - with
+// SSH_CONNECTION set the way sshd sets it (empty conn leaves it unset).
+func viaFakeSSH(opts Options, conn string) func() *exec.Cmd {
+	return func() *exec.Cmd {
+		cmd := helperCmd("ssh", opts.captureArgs()...)
+		env := cmd.Env[:0:0]
+		for _, kv := range cmd.Env {
+			if !strings.HasPrefix(kv, "SSH_CONNECTION=") {
+				env = append(env, kv)
+			}
+		}
+		if conn != "" {
+			env = append(env, "SSH_CONNECTION="+conn)
+		}
+		cmd.Env = env
+		return cmd
 	}
-	script := "#!/bin/sh\nshift\nexec env " + env + "sh -c \"$*\"\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake ssh: %v", err)
-	}
-	return path
 }
 
 // fakeTcpdump writes a "tcpdump" stand-in that records its argv, one per
@@ -42,10 +45,13 @@ func fakeTcpdump(t *testing.T, pcapPath string) (bin, argsFile string) {
 	return bin, argsFile
 }
 
-// runCapture starts a real SSH source (the production command line, no
-// cmdFactory) through the fakes and waits for its first packet.
-func runCapture(t *testing.T, opts Options) {
+// runCapture starts an SSH source whose remote command is the production
+// one, run through the fake ssh (see viaFakeSSH) as if sshd had set
+// SSH_CONNECTION to conn, and waits for its first packet.
+func runCapture(t *testing.T, opts Options, conn string) {
 	t.Helper()
+	requireSh(t)
+	opts.cmdFactory = viaFakeSSH(opts, conn)
 	s, err := New(opts)
 	if err != nil {
 		t.Fatalf("New error: %v", err)
@@ -74,7 +80,7 @@ func readArgs(t *testing.T, argsFile string) []string {
 func TestSSH_ExcludesOwnSSHConnectionFromCapture(t *testing.T) {
 	t.Parallel()
 	bin, argsFile := fakeTcpdump(t, buildPcapFile(t, 1))
-	runCapture(t, Options{Host: "h", Iface: "eth0", SSHBinary: fakeSSH(t, "203.0.113.7 51234 198.51.100.1 22"), TcpdumpPath: bin})
+	runCapture(t, Options{Host: "h", Iface: "eth0", TcpdumpPath: bin}, "203.0.113.7 51234 198.51.100.1 22")
 
 	got := readArgs(t, argsFile)
 	want := []string{"-i", "eth0", "-U", "-w", "-", "not (host 203.0.113.7 and port 51234)"}
@@ -86,7 +92,7 @@ func TestSSH_ExcludesOwnSSHConnectionFromCapture(t *testing.T) {
 func TestSSH_IPv6ClientConnectionExcluded(t *testing.T) {
 	t.Parallel()
 	bin, argsFile := fakeTcpdump(t, buildPcapFile(t, 1))
-	runCapture(t, Options{Host: "h", Iface: "eth0", SSHBinary: fakeSSH(t, "2001:db8::7 40000 2001:db8::1 22"), TcpdumpPath: bin})
+	runCapture(t, Options{Host: "h", Iface: "eth0", TcpdumpPath: bin}, "2001:db8::7 40000 2001:db8::1 22")
 	if got := readArgs(t, argsFile); got[len(got)-1] != "not (host 2001:db8::7 and port 40000)" {
 		t.Fatalf("filter = %q, want the IPv6 client excluded", got[len(got)-1])
 	}
@@ -96,7 +102,7 @@ func TestSSH_TcpdumpCommandPrefixSplitsIntoWords(t *testing.T) {
 	t.Parallel()
 	bin, argsFile := fakeTcpdump(t, buildPcapFile(t, 1))
 	// "env" stands in for "sudo -n": a prefix command that execs the rest.
-	runCapture(t, Options{Host: "h", Iface: "eth0", SSHBinary: fakeSSH(t, "10.0.0.5 5000 10.0.0.1 22"), TcpdumpPath: "env " + bin})
+	runCapture(t, Options{Host: "h", Iface: "eth0", TcpdumpPath: "env " + bin}, "10.0.0.5 5000 10.0.0.1 22")
 	if got := readArgs(t, argsFile); got[0] != "-i" || got[1] != "eth0" {
 		t.Fatalf("tcpdump argv = %q, want the prefix to run tcpdump with the usual flags", got)
 	}
@@ -107,7 +113,7 @@ func TestSSH_TcpdumpCommandPrefixSplitsIntoWords(t *testing.T) {
 func TestSSH_NoSSHConnectionRunsUnfiltered(t *testing.T) {
 	t.Parallel()
 	bin, argsFile := fakeTcpdump(t, buildPcapFile(t, 1))
-	runCapture(t, Options{Host: "h", Iface: "eth0", SSHBinary: fakeSSH(t, ""), TcpdumpPath: bin})
+	runCapture(t, Options{Host: "h", Iface: "eth0", TcpdumpPath: bin}, "")
 	if got := readArgs(t, argsFile); strings.Join(got, " ") != "-i eth0 -U -w -" {
 		t.Fatalf("tcpdump argv without SSH_CONNECTION = %q, want an unfiltered capture", got)
 	}
@@ -120,7 +126,7 @@ func TestSSH_Chaos_HostileInterfaceNameStaysOneArgument(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "pwned")
 	bin, argsFile := fakeTcpdump(t, buildPcapFile(t, 1))
 	iface := fmt.Sprintf("eth0'; touch %s; echo '$(touch %s) \"quoted\" *", marker, marker)
-	runCapture(t, Options{Host: "h", Iface: iface, SSHBinary: fakeSSH(t, "10.0.0.5 5000 10.0.0.1 22"), TcpdumpPath: bin})
+	runCapture(t, Options{Host: "h", Iface: iface, TcpdumpPath: bin}, "10.0.0.5 5000 10.0.0.1 22")
 
 	if got := readArgs(t, argsFile); got[1] != iface {
 		t.Fatalf("interface arg = %q, want it passed through verbatim as one argument %q", got[1], iface)
@@ -132,6 +138,7 @@ func TestSSH_Chaos_HostileInterfaceNameStaysOneArgument(t *testing.T) {
 
 func TestShellQuote_RoundTripsThroughSh(t *testing.T) {
 	t.Parallel()
+	requireSh(t)
 	for _, s := range []string{"", "plain", "it's", "''", `a\b`, "$(x) `y` $z", "new\nline", "'\"'\"'"} {
 		out, err := execSh(t, "printf %s "+shellQuote(s))
 		if err != nil || out != s {

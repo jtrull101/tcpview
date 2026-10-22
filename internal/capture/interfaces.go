@@ -1,7 +1,10 @@
 package capture
 
 import (
+	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 
 	"github.com/gopacket/gopacket/pcap"
 )
@@ -13,6 +16,24 @@ type Interface struct {
 	Addresses   []string
 }
 
+// DisplayName is the name to show people. On Windows, Npcap names
+// interfaces by device path ("\Device\NPF_{4A1C...}"), which says nothing
+// about which adapter it is; the description ("Intel(R) Ethernet ...")
+// does, so that's shown instead. Everywhere else the name is already the
+// familiar one (eth0, en0, lo).
+func (i Interface) DisplayName() string {
+	if strings.HasPrefix(i.Name, `\Device\`) && i.Description != "" {
+		return i.Description
+	}
+	return i.Name
+}
+
+// ErrNpcapMissing is returned by ListInterfaces on Windows when Npcap,
+// which provides the packet capture driver and wpcap.dll, isn't installed.
+// tcpview can't bundle it: Npcap's free license doesn't allow
+// redistribution.
+var ErrNpcapMissing = errors.New("capture: live capture on Windows needs Npcap - install it from https://npcap.com/#download, then run tcpview again")
+
 // ListInterfaces enumerates local capture-able interfaces via libpcap. This
 // requires libpcap to be installed but not elevated privileges (listing
 // interfaces, unlike opening one for capture, doesn't need root/CAP_NET_RAW
@@ -20,7 +41,7 @@ type Interface struct {
 func ListInterfaces() ([]Interface, error) {
 	devs, err := pcap.FindAllDevs()
 	if err != nil {
-		return nil, fmt.Errorf("capture: list interfaces: %w", err)
+		return nil, explainListError(runtime.GOOS, err)
 	}
 
 	out := make([]Interface, 0, len(devs))
@@ -38,4 +59,13 @@ func ListInterfaces() ([]Interface, error) {
 		})
 	}
 	return out, nil
+}
+
+// explainListError turns a FindAllDevs failure into something actionable.
+// gopacket reports a missing Npcap only as "couldn't load wpcap.dll".
+func explainListError(goos string, err error) error {
+	if goos == "windows" && strings.Contains(err.Error(), "wpcap.dll") {
+		return fmt.Errorf("%w (%v)", ErrNpcapMissing, err)
+	}
+	return fmt.Errorf("capture: list interfaces: %w", err)
 }
