@@ -7,10 +7,10 @@ import (
 )
 
 // FuzzReadArchiveFile feeds arbitrary file contents through the archive
-// reader's line-by-line JSON decoder. A malformed line must produce an
-// error, never a panic - archive files are read back long after being
+// reader's line-by-line JSON decoder. A malformed line must be skipped and
+// counted, never panic - archive files are read back long after being
 // written, so any corruption (partial write, disk error, manual edit)
-// needs to fail cleanly rather than crash the rewind path.
+// needs to degrade cleanly rather than crash the rewind path.
 func FuzzReadArchiveFile(f *testing.F) {
 	f.Add([]byte(""))
 	f.Add([]byte("{}\n"))
@@ -31,6 +31,9 @@ func FuzzReadArchiveFile(f *testing.F) {
 				t.Fatalf("readArchiveFile panicked on %q: %v", data, rec)
 			}
 		}()
-		_, _ = readArchiveFile(path)
+		pkts, skipped, err := readArchiveFile(path)
+		if err == nil && skipped < 0 {
+			t.Fatalf("negative skip count %d (%d packets)", skipped, len(pkts))
+		}
 	})
 }
