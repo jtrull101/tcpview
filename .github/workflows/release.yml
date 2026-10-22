@@ -18,6 +18,9 @@ jobs:
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
+          - os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
           - os: macos-15-intel
             goos: darwin
             goarch: amd64
@@ -35,9 +38,16 @@ jobs:
           go-version: "1.26"
           check-latest: true
 
-      - name: Install libpcap (Linux)
+      - name: Build static libpcap (Linux)
+        # Linking the runner's shared libpcap tied the binary to Ubuntu's
+        # libpcap.so.0.8 soname, so it failed to start on distros that only
+        # ship libpcap.so.1 (e.g. Arch). See .github/libpcap/build.sh.
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+        run: |
+          sudo apt-get update && sudo apt-get install -y flex bison
+          .github/libpcap/build.sh "$RUNNER_TEMP/libpcap"
+          echo "CGO_CFLAGS=-I$RUNNER_TEMP/libpcap/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L$RUNNER_TEMP/libpcap/lib" >> "$GITHUB_ENV"
 
       - name: Install libpcap (macOS)
         if: runner.os == 'macOS'
@@ -54,11 +64,19 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" \
             -o dist/tcpview .
 
+      - name: Check libpcap is linked statically (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ldd dist/tcpview
+          if ldd dist/tcpview | grep -q libpcap; then
+            echo "dist/tcpview links libpcap dynamically"; exit 1
+          fi
+
       - name: Package
         run: |
           name="tcpview-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p "pkg/${name}"
-          cp dist/tcpview README.md CLAUDE.md "pkg/${name}/"
+          cp dist/tcpview README.md LICENSE "pkg/${name}/"
           tar -C pkg -czf "${name}.tar.gz" "${name}"
 
       - name: Upload artifact
@@ -82,6 +100,10 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Checksums
+        # install.sh verifies downloads against this file.
+        run: cd artifacts && sha256sum *.tar.gz | tee SHA256SUMS
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,4 +111,4 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
-            artifacts/*.tar.gz
+            artifacts/*.tar.gz artifacts/SHA256SUMS

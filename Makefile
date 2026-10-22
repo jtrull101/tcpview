@@ -2,7 +2,6 @@ BINARY     := tcpview
 VERSION    := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS    := -s -w -X main.version=$(VERSION)
 FUZZTIME   := 10s
-COVER_MIN  := 90
 
 .PHONY: all
 all: build ## Build the tcpview binary (default target)
@@ -46,11 +45,8 @@ cover-html: cover ## Generate and open an HTML coverage report
 	@echo "coverage.html written"
 
 .PHONY: cover-check
-cover-check: cover ## Run cover, then fail if aggregate coverage is below $(COVER_MIN)%
-	@total=$$(go tool cover -func=coverage.out | tail -1 | awk '{print $$3}' | tr -d '%'); \
-	echo "Aggregate line coverage: $${total}%"; \
-	awk -v c="$$total" -v min="$(COVER_MIN)" 'BEGIN { exit (c + 0 >= min) ? 0 : 1 }' \
-		|| { echo "Aggregate coverage $${total}% is below the $(COVER_MIN)% gate"; exit 1; }
+cover-check: cover ## Run cover, then fail if aggregate (90%) or any package's coverage is below its floor
+	@sh scripts/coverage-gate.sh coverage.out
 
 .PHONY: fuzz
 fuzz: ## Run a short fuzz smoke pass (FUZZTIME=10s) across every Fuzz target

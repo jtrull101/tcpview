@@ -1,0 +1,19 @@
+# Weekly update PRs for Go modules and the GitHub Actions the workflows use.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # charmbracelet/* and golang.org/x/* move together; one PR each, not
+      # one per module.
+      charmbracelet:
+        patterns: ["github.com/charmbracelet/*"]
+      golang-x:
+        patterns: ["golang.org/x/*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
