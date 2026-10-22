@@ -45,6 +45,11 @@ var newRemoteSource = func(opts remote.Options) (capture.Source, error) {
 // trip.
 var listRemoteInterfaces = remote.ListInterfaces
 
+// listLocalInterfaces is a seam over capture.ListInterfaces, swapped out
+// in tests so runLocal's wiring doesn't depend on the machine running
+// them having libpcap (or, on Windows, Npcap) installed.
+var listLocalInterfaces = capture.ListInterfaces
+
 // newArchiveFn is a seam over store.NewArchive, swapped out in tests so
 // archive wiring is testable without touching the real filesystem default
 // location.
@@ -197,7 +202,7 @@ func runLocal(ac archiveConfig, stderr *os.File) int {
 		return 1
 	}
 
-	ifaces, err := capture.ListInterfaces()
+	ifaces, err := listLocalInterfaces()
 	if err != nil {
 		fmt.Fprintf(stderr, "tcpview: %v\n", err)
 		return 1
