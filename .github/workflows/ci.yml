@@ -75,14 +75,20 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
       - name: Fuzz smoke tests
+        # -fuzzminimizetime=0 disables input minimization. On a cold fuzz
+        # cache each target finds new inputs within seconds, stops fuzzing
+        # to minimize them (up to 60s each), and the 10s deadline lands
+        # mid-minimization - Go's fuzzer then intermittently reports
+        # "context deadline exceeded" as a failure. A crashing input is
+        # still saved and still fails the job, just unminimized.
         run: |
           set -e
-          go test ./internal/filter/... -run=^$ -fuzz=FuzzParseExpression -fuzztime=10s
-          go test ./internal/filter/... -run=^$ -fuzz=FuzzFilterMatches -fuzztime=10s
-          go test ./internal/capture/... -run=^$ -fuzz=FuzzDecode -fuzztime=10s
-          go test ./internal/store/... -run=^$ -fuzz=FuzzReadArchiveFile -fuzztime=10s
-          go test ./internal/remote/... -run=^$ -fuzz=FuzzParseTcpdumpList -fuzztime=10s
-          go test . -run=^$ -fuzz=FuzzParseCapEff -fuzztime=10s
+          go test ./internal/filter/... -run=^$ -fuzz=FuzzParseExpression -fuzztime=10s -fuzzminimizetime=0
+          go test ./internal/filter/... -run=^$ -fuzz=FuzzFilterMatches -fuzztime=10s -fuzzminimizetime=0
+          go test ./internal/capture/... -run=^$ -fuzz=FuzzDecode -fuzztime=10s -fuzzminimizetime=0
+          go test ./internal/store/... -run=^$ -fuzz=FuzzReadArchiveFile -fuzztime=10s -fuzzminimizetime=0
+          go test ./internal/remote/... -run=^$ -fuzz=FuzzParseTcpdumpList -fuzztime=10s -fuzzminimizetime=0
+          go test . -run=^$ -fuzz=FuzzParseCapEff -fuzztime=10s -fuzzminimizetime=0
 
   test-macos:
     # The release builds darwin binaries too; without this, a Mac-only

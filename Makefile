@@ -48,14 +48,18 @@ cover-html: cover ## Generate and open an HTML coverage report
 cover-check: cover ## Run cover, then fail if aggregate (90%) or any package's coverage is below its floor
 	@sh scripts/coverage-gate.sh coverage.out
 
+# Minimization is off for the same reason as in CI (see ci.yml): with it
+# on, a short run spends most of its time minimizing new inputs and can
+# fail spuriously when the deadline lands mid-minimization. To minimize a
+# crasher this finds, re-run its target without -fuzzminimizetime=0.
 .PHONY: fuzz
 fuzz: ## Run a short fuzz smoke pass (FUZZTIME=10s) across every Fuzz target
-	go test ./internal/filter/... -run=^$$ -fuzz=FuzzParseExpression -fuzztime=$(FUZZTIME)
-	go test ./internal/filter/... -run=^$$ -fuzz=FuzzFilterMatches -fuzztime=$(FUZZTIME)
-	go test ./internal/capture/... -run=^$$ -fuzz=FuzzDecode -fuzztime=$(FUZZTIME)
-	go test ./internal/store/... -run=^$$ -fuzz=FuzzReadArchiveFile -fuzztime=$(FUZZTIME)
-	go test ./internal/remote/... -run=^$$ -fuzz=FuzzParseTcpdumpList -fuzztime=$(FUZZTIME)
-	go test . -run=^$$ -fuzz=FuzzParseCapEff -fuzztime=$(FUZZTIME)
+	go test ./internal/filter/... -run=^$$ -fuzz=FuzzParseExpression -fuzztime=$(FUZZTIME) -fuzzminimizetime=0
+	go test ./internal/filter/... -run=^$$ -fuzz=FuzzFilterMatches -fuzztime=$(FUZZTIME) -fuzzminimizetime=0
+	go test ./internal/capture/... -run=^$$ -fuzz=FuzzDecode -fuzztime=$(FUZZTIME) -fuzzminimizetime=0
+	go test ./internal/store/... -run=^$$ -fuzz=FuzzReadArchiveFile -fuzztime=$(FUZZTIME) -fuzzminimizetime=0
+	go test ./internal/remote/... -run=^$$ -fuzz=FuzzParseTcpdumpList -fuzztime=$(FUZZTIME) -fuzzminimizetime=0
+	go test . -run=^$$ -fuzz=FuzzParseCapEff -fuzztime=$(FUZZTIME) -fuzzminimizetime=0
 
 .PHONY: fmt
 fmt: ## Reformat the codebase with gofmt
