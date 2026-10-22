@@ -5,11 +5,16 @@
 #
 # Env vars:
 #   VERSION      release tag to install, e.g. "v0.1.0" (default: latest)
-#   INSTALL_DIR  where the binary goes (default: $HOME/.local/bin)
+#   INSTALL_DIR  where the binary goes (default: /usr/local/bin)
+#
+# /usr/local/bin by default so that "sudo tcpview" works: sudo ignores your
+# PATH in favour of its own secure_path, which includes /usr/local/bin on
+# every mainstream distro but never ~/.local/bin. If the directory isn't
+# writable, only the final copy into it runs under sudo.
 set -eu
 
 REPO="jtrull101/tcpview"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 os() {
 	case "$(uname -s)" in
@@ -84,8 +89,21 @@ fi
 
 tar -xzf "${TMPDIR}/${ASSET}" -C "$TMPDIR"
 
-mkdir -p "$INSTALL_DIR"
-install -m 0755 "${TMPDIR}/tcpview-${VERSION}-${OS}-${ARCH}/tcpview" "${INSTALL_DIR}/tcpview"
+# Use sudo for the copy only when the target isn't writable as-is (it
+# usually isn't, for /usr/local/bin), and say so before it prompts.
+AS_ROOT=""
+if ! mkdir -p "$INSTALL_DIR" 2>/dev/null || [ ! -w "$INSTALL_DIR" ]; then
+	if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+		echo "tcpview: ${INSTALL_DIR} needs root to write to - using sudo for the copy"
+		AS_ROOT="sudo"
+	else
+		echo "tcpview: can't write to ${INSTALL_DIR} - re-run with sudo, or pick a directory you own, e.g.:" >&2
+		echo "  curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | INSTALL_DIR=\$HOME/.local/bin sh" >&2
+		exit 1
+	fi
+fi
+$AS_ROOT mkdir -p "$INSTALL_DIR"
+$AS_ROOT install -m 0755 "${TMPDIR}/tcpview-${VERSION}-${OS}-${ARCH}/tcpview" "${INSTALL_DIR}/tcpview"
 
 echo "tcpview: installed ${VERSION} to ${INSTALL_DIR}/tcpview"
 
@@ -106,6 +124,19 @@ if [ "$OS" = "linux" ]; then
 		fi
 		echo "  Or build from source instead: go build -o tcpview ." >&2
 	fi
-	echo "tcpview: live capture needs CAP_NET_RAW - either run with sudo, or once:" >&2
-	echo "  sudo setcap cap_net_raw,cap_net_admin=eip ${INSTALL_DIR}/tcpview" >&2
+fi
+
+# sudo only finds commands on its secure_path; warn when a custom
+# INSTALL_DIR isn't on it, rather than leave "sudo tcpview" failing with
+# "command not found".
+case ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:" in
+*":${INSTALL_DIR}:"*) RUN="sudo tcpview" ;;
+*)
+	RUN="sudo ${INSTALL_DIR}/tcpview"
+	echo "tcpview: note - sudo won't find tcpview in ${INSTALL_DIR} by name; use the full path" >&2
+	;;
+esac
+echo "tcpview: run it with: ${RUN}"
+if [ "$OS" = "linux" ]; then
+	echo "  (or skip sudo from now on: sudo setcap cap_net_raw,cap_net_admin=eip ${INSTALL_DIR}/tcpview)"
 fi

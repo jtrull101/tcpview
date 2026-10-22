@@ -97,9 +97,10 @@ This is the feature a plain `tcpdump`/Wireshark live-capture session can't give 
 
 ```sh
 curl -sSL https://raw.githubusercontent.com/jtrull101/tcpview/main/install.sh | sh
+sudo tcpview
 ```
 
-Detects your OS/arch, downloads the matching asset from the [latest release](https://github.com/jtrull101/tcpview/releases), and installs it to `~/.local/bin/tcpview` (override with `INSTALL_DIR=/somewhere sh install.sh`; pin a version with `VERSION=v0.1.0 sh install.sh`). Prebuilt binaries cover linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64 (see [Windows](#windows) below; the script is for Linux and macOS). The script checks the download against the release's `SHA256SUMS` and refuses to install on a mismatch.
+Detects your OS/arch, downloads the matching asset from the [latest release](https://github.com/jtrull101/tcpview/releases), and installs it to `/usr/local/bin/tcpview`, using `sudo` for that one copy if the directory isn't writable. `/usr/local/bin` is on `sudo`'s `secure_path`, which is why plain `sudo tcpview` works afterwards; a directory like `~/.local/bin` isn't, so `sudo` wouldn't find it there. Override with `INSTALL_DIR=/somewhere` (the script then tells you to run it by full path if `sudo` won't find it); pin a version with `VERSION=v0.1.0`. Both go before `sh` in the pipe, e.g. `curl ... | INSTALL_DIR=$HOME/.local/bin sh`. Prebuilt binaries cover linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64 (see [Windows](#windows) below; the script is for Linux and macOS). The script checks the download against the release's `SHA256SUMS` and refuses to install on a mismatch.
 
 The Linux binaries link libpcap statically (a minimal build, see `.github/libpcap/build.sh`), so they run on any glibc distro regardless of which libpcap soname it ships. They leave out libpcap's Bluetooth, D-Bus, USB and RDMA capture backends, so those pseudo-interfaces don't appear in the picker; build from source (below) if you need them.
 
@@ -142,17 +143,18 @@ make help          # list all targets
 
 ## Running
 
-Live capture needs elevated privileges on Linux (`CAP_NET_RAW`). Either:
+Live capture needs elevated privileges on Linux (`CAP_NET_RAW`), including under WSL2. Either:
 
 ```sh
-sudo ./tcpview
+sudo tcpview       # installed with install.sh
+sudo ./tcpview     # built from source
 ```
 
 or grant the capability once so you don't need `sudo` every time:
 
 ```sh
-sudo setcap cap_net_raw,cap_net_admin=eip ./tcpview
-./tcpview
+sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v tcpview)"
+tcpview
 ```
 
 ### Remote capture
