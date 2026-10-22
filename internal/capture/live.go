@@ -108,6 +108,7 @@ func (l *Live) loop(src gopacket.PacketDataSource, linkType layers.LinkType) {
 				}
 				continue
 			}
+			p.LinkType, p.HasLinkType = uint16(linkType), true
 			select {
 			case l.packets <- p:
 			case <-l.done:

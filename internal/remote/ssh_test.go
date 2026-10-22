@@ -124,6 +124,23 @@ func TestSSH_DecodesPacketsFromFakeRemoteCommand(t *testing.T) {
 	}
 }
 
+func TestSSH_RecordsRemoteLinkType(t *testing.T) {
+	t.Parallel()
+	s, err := New(Options{Host: "fake-host", Iface: "eth0", cmdFactory: catFactory(buildPcapFile(t, 1))})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer s.Close()
+	select {
+	case p := <-s.Packets():
+		if !p.HasLinkType || p.LinkType != uint16(layers.LinkTypeEthernet) {
+			t.Fatalf("link type = %d (known=%v), want the remote stream's Ethernet", p.LinkType, p.HasLinkType)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no packet from the fake remote")
+	}
+}
+
 // --- negative ---
 
 func TestSSH_MissingHostErrors(t *testing.T) {

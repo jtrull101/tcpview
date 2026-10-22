@@ -5,7 +5,9 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -80,19 +82,48 @@ type Model struct {
 	archive       *store.Archive
 	archiveReader *store.ArchiveReader
 
+	// rewindArchive caches what the archive holds for the current rewind
+	// window, loaded off the Update goroutine (see loadArchiveWindow):
+	// reading the archive can take a while, and the view redraws every
+	// renderInterval. rewindArchiveAt is the timeline.at it was loaded
+	// for; any other value means "not loaded (yet)".
+	rewindArchive   []store.Packet
+	rewindArchiveAt time.Time
+
 	err           error
 	width, height int
 }
 
-func newTable() table.Model {
-	columns := []table.Column{
+// Address column widths: wide enough for "255.255.255.255:65535" by
+// default, growing with the terminal up to a full bracketed IPv6
+// address and port ("[ffff:...:ffff]:65535", 47 chars).
+const (
+	minAddrWidth = 24
+	maxAddrWidth = 47
+	// fixedColsWidth is everything but the two address columns: Time,
+	// Proto and Len, plus the table's 1-cell padding either side of all
+	// five columns.
+	fixedColsWidth = 12 + 6 + 6 + 5*2
+)
+
+func tableColumns(addrWidth int) []table.Column {
+	return []table.Column{
 		{Title: "Time", Width: 12},
 		{Title: "Proto", Width: 6},
-		{Title: "Source", Width: 24},
-		{Title: "Destination", Width: 24},
+		{Title: "Source", Width: addrWidth},
+		{Title: "Destination", Width: addrWidth},
 		{Title: "Len", Width: 6},
 	}
-	return table.New(table.WithColumns(columns), table.WithFocused(true), table.WithHeight(20))
+}
+
+// addrWidthFor splits whatever terminal width the fixed columns leave
+// between Source and Destination, within [minAddrWidth, maxAddrWidth].
+func addrWidthFor(termWidth int) int {
+	return min(max((termWidth-fixedColsWidth)/2, minAddrWidth), maxAddrWidth)
+}
+
+func newTable() table.Model {
+	return table.New(table.WithColumns(tableColumns(minAddrWidth)), table.WithFocused(true), table.WithHeight(20))
 }
 
 // NewModel starts in the interface-picker view; capture begins once the
@@ -186,15 +217,18 @@ func (m *Model) SetExportDir(dir string) {
 // exportCurrentView writes whatever's currently displayed (post-filter,
 // live or rewound) to a new pcap file, named uniquely by the current time.
 func (m *Model) exportCurrentView() {
-	name := fmt.Sprintf("tcpview-export-%d.pcap", time.Now().UnixNano())
+	name := fmt.Sprintf("tcpview-export-%d.pcapng", time.Now().UnixNano())
 	path := filepath.Join(m.exportDir, name)
-	n, err := export.WritePcap(path, m.displayed)
+	res, err := export.WritePcapNG(path, m.displayed)
 	if err != nil {
 		m.err = err
 		return
 	}
 	m.err = nil
-	m.status = fmt.Sprintf("exported %d packet(s) to %s", n, path)
+	m.status = fmt.Sprintf("exported %d packet(s) to %s", res.Packets, path)
+	if res.LinkTypes > 1 {
+		m.status += fmt.Sprintf(" (mixes %d link types: opens in Wireshark, not tcpdump)", res.LinkTypes)
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -217,6 +251,36 @@ type sourceOpenedMsg struct {
 type openErrMsg struct {
 	err error
 	gen int
+}
+
+// archiveWindowMsg carries the archive's contents for the rewind window
+// around at, read in the background by loadArchiveWindow.
+type archiveWindowMsg struct {
+	at   time.Time
+	pkts []store.Packet
+	err  error
+}
+
+func loadArchiveWindow(r *store.ArchiveReader, at, from, to time.Time) tea.Cmd {
+	return func() tea.Msg {
+		pkts, err := r.Range(from, to)
+		return archiveWindowMsg{at: at, pkts: pkts, err: err}
+	}
+}
+
+// rewindMoved redraws after the rewind point changed, and starts loading
+// the archive's part of the new window if it isn't cached already. Until
+// that arrives the view shows what the in-memory ring has for the window.
+func (m *Model) rewindMoved() tea.Cmd {
+	if !m.timeline.active {
+		m.rewindArchive, m.rewindArchiveAt = nil, time.Time{}
+	}
+	m.refreshRows()
+	if !m.timeline.active || m.archiveReader == nil || m.rewindArchiveAt.Equal(m.timeline.at) {
+		return nil
+	}
+	from, to := m.timeline.window()
+	return loadArchiveWindow(m.archiveReader, m.timeline.at, from, to)
 }
 
 // fromSourceMsg tags a message read off one specific source's channels.
@@ -316,7 +380,7 @@ func (m *Model) switchInterface(delta int) tea.Cmd {
 	}
 	m.resetRing()
 	m.timeline.jumpToLive()
-	m.refreshRows()
+	m.rewindMoved()
 	m.dirty = false
 
 	m.openGen++
@@ -345,6 +409,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.table.SetColumns(tableColumns(addrWidthFor(msg.Width)))
 		m.table.SetWidth(msg.Width)
 		if h := msg.Height - 8; h > 0 {
 			m.table.SetHeight(h)
@@ -382,6 +447,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = ""
 		return m, nil
 
+	case archiveWindowMsg:
+		if !m.timeline.active || !msg.at.Equal(m.timeline.at) {
+			return m, nil // scrubbed elsewhere (or back to live) since this load started
+		}
+		var corrupt *store.CorruptLinesError
+		switch {
+		case errors.As(msg.err, &corrupt):
+			m.status = fmt.Sprintf("rewind: %v", msg.err) // the rest of the archive still loaded
+		case msg.err != nil:
+			m.err = fmt.Errorf("rewind: read archive: %w", msg.err)
+		}
+		m.rewindArchive, m.rewindArchiveAt = msg.pkts, msg.at
+		m.refreshRows()
+		return m, nil
+
 	case packetMsg:
 		evicted := m.ring.Add(store.Packet(msg))
 		if m.archive != nil {
@@ -390,6 +470,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.err = err
 				}
 			}
+			m.keepEvictedInRewindWindow(evicted)
 		}
 		m.dirty = true
 		if m.source == nil {
@@ -480,16 +561,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.filterBar.input.Focus()
 	case "left":
 		m.timeline.stepBack(time.Now())
-		m.refreshRows()
-		return m, nil
+		return m, m.rewindMoved()
 	case "right":
 		m.timeline.stepForward(time.Now())
-		m.refreshRows()
-		return m, nil
+		return m, m.rewindMoved()
 	case "L":
 		m.timeline.jumpToLive()
-		m.refreshRows()
-		return m, nil
+		return m, m.rewindMoved()
 	case "enter":
 		if cursor := m.table.Cursor(); cursor >= 0 && cursor < len(m.displayed) {
 			m.selected = m.displayed[cursor]
@@ -546,8 +624,8 @@ func (m *Model) refreshRows() {
 		rows = append(rows, table.Row{
 			p.Time.Format("15:04:05.000"),
 			string(p.Proto),
-			endpoint(p.SrcIP.String(), p.SrcPort),
-			endpoint(p.DstIP.String(), p.DstPort),
+			endpoint(p.SrcIP, p.SrcPort),
+			endpoint(p.DstIP, p.DstPort),
 			fmt.Sprintf("%d", p.Length),
 		})
 		displayed = append(displayed, p)
@@ -562,10 +640,27 @@ func (m *Model) refreshRows() {
 	}
 }
 
+// keepEvictedInRewindWindow adds packets the ring just evicted into the
+// archive to the cached rewind window, when they fall inside it. Without
+// this, rewinding to a point the ring still covered and then letting the
+// ring evict it would make those packets vanish: no longer in the ring,
+// and newer than the archive snapshot the cache was loaded from.
+func (m *Model) keepEvictedInRewindWindow(evicted []store.Packet) {
+	if !m.timeline.active || !m.rewindArchiveAt.Equal(m.timeline.at) {
+		return
+	}
+	from, to := m.timeline.window()
+	for _, e := range evicted {
+		if !e.Time.Before(from) && !e.Time.After(to) {
+			m.rewindArchive = append(m.rewindArchive, e)
+		}
+	}
+}
+
 // packetsForDisplay returns the packets refreshRows should render: the
 // full live ring when not rewound, or a merged, time-sorted view of
-// whatever the ring and (if enabled) the on-disk archive hold within the
-// current rewind window otherwise.
+// whatever the ring and the cached archive window (once loaded) hold
+// within the current rewind window otherwise.
 func (m Model) packetsForDisplay() []store.Packet {
 	if !m.timeline.active {
 		return m.ring.Snapshot()
@@ -573,23 +668,28 @@ func (m Model) packetsForDisplay() []store.Packet {
 
 	from, to := m.timeline.window()
 	pkts := m.ring.Range(from, to)
-	if m.archiveReader != nil {
-		if archived, err := m.archiveReader.Range(from, to); err == nil {
-			pkts = append(pkts, archived...)
-			sort.Slice(pkts, func(i, j int) bool { return pkts[i].Time.Before(pkts[j].Time) })
-		}
+	if len(m.rewindArchive) > 0 && m.rewindArchiveAt.Equal(m.timeline.at) {
+		pkts = append(pkts, m.rewindArchive...)
+		sort.Slice(pkts, func(i, j int) bool { return pkts[i].Time.Before(pkts[j].Time) })
 	}
 	return pkts
 }
 
-func endpoint(ip string, port uint16) string {
-	if ip == "invalid IP" || ip == "" {
-		ip = "?"
+// endpoint renders addr[:port] for the table. IPv6 addresses with a port
+// are bracketed ("[2001:db8::1]:443"): unbracketed, the port would read
+// as just another address group. A missing address (e.g. ARP) shows "?".
+func endpoint(addr netip.Addr, port uint16) string {
+	switch {
+	case !addr.IsValid():
+		if port == 0 {
+			return "?"
+		}
+		return fmt.Sprintf("?:%d", port)
+	case port == 0:
+		return addr.String()
+	default:
+		return netip.AddrPortFrom(addr, port).String()
 	}
-	if port == 0 {
-		return ip
-	}
-	return fmt.Sprintf("%s:%d", ip, port)
 }
 
 func (m Model) View() string {
