@@ -75,6 +75,9 @@ func TestLiveFromSource_DecodesAllPackets(t *testing.T) {
 			if p.Proto == "" {
 				t.Fatal("decoded packet has empty Proto")
 			}
+			if !p.HasLinkType || p.LinkType != uint16(layers.LinkTypeEthernet) {
+				t.Fatalf("packet link type = %d (known=%v), want Ethernet recorded for export", p.LinkType, p.HasLinkType)
+			}
 			got++
 		case <-deadline:
 			t.Fatalf("timed out after %d/3 packets", got)

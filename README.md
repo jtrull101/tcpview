@@ -22,17 +22,18 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
   - [Config file](#config-file)
 - [Development](#development)
   - [CI / releases](#ci--releases)
+- [License](#license)
 
 ![tcpview live-tailing loopback traffic on lo (3 of 10 interfaces), filtered to proto=icmp](docs/screenshot.png)
 
 ## Features
 
-- **Live capture** on a local interface via libpcap, or on a **remote host over SSH** (`ssh <host> tcpdump -i <iface> -U -w -`, piped and decoded locally - no agent to install on the remote box, just SSH access and `tcpdump`).
+- **Live capture** on a local interface via libpcap, or on a **remote host over SSH** (`ssh <host> tcpdump -i <iface> -U -w -`, piped and decoded locally - no agent to install on the remote box, just SSH access and `tcpdump`). The SSH connection carrying the capture is filtered out of it automatically.
 - **Live interface switching** - press `tab` / `shift+tab` mid-capture to cycle through interfaces without restarting, locally or on a remote host.
 - **Interactive filtering** - press `/` and type a simple expression like `proto=tcp dport=443 src=10.0.0.0/24`, applied live against whatever's currently buffered.
 - **Rewind** - press `←` to scrub backward through traffic that already scrolled off, `→` to scrub forward, `L` to jump back to live. Recent traffic is served from an in-memory ring; anything older comes from a bounded on-disk archive (see below).
 - **Packet detail** - press `enter` on any row for a parsed field breakdown plus a hex+ASCII dump of the raw frame.
-- **Export to pcap** - press `e` to write whatever's currently shown (post-filter) to a real pcap file, openable in tcpdump/Wireshark/etc.
+- **Export to pcapng** - press `e` to write whatever's currently shown (post-filter) to a real pcapng file, openable in Wireshark/tcpdump/etc, with each frame labeled with the link type it was actually captured with.
 - **Help** - press `?` for a full keybinding reference at any time.
 
 ## A tour, in screenshots
@@ -97,15 +98,11 @@ This is the feature a plain `tcpdump`/Wireshark live-capture session can't give 
 curl -sSL https://raw.githubusercontent.com/jtrull101/tcpview/main/install.sh | sh
 ```
 
-Detects your OS/arch, downloads the matching asset from the [latest release](https://github.com/jtrull101/tcpview/releases), and installs it to `~/.local/bin/tcpview` (override with `INSTALL_DIR=/somewhere sh install.sh`; pin a version with `VERSION=v0.1.0 sh install.sh`). Prebuilt binaries cover linux/amd64, darwin/amd64, and darwin/arm64.
+Detects your OS/arch, downloads the matching asset from the [latest release](https://github.com/jtrull101/tcpview/releases), and installs it to `~/.local/bin/tcpview` (override with `INSTALL_DIR=/somewhere sh install.sh`; pin a version with `VERSION=v0.1.0 sh install.sh`). Prebuilt binaries cover linux/amd64, linux/arm64, darwin/amd64, and darwin/arm64. The script checks the download against the release's `SHA256SUMS` and refuses to install on a mismatch.
 
-**Linux note**: the released binary is built on GitHub's `ubuntu-latest` runner, which links against the legacy `libpcap.so.0.8` soname. Distros that only ship the modern `libpcap.so.1` (e.g. current Arch) will fail to launch it with a `cannot open shared object file` error - the install script detects this and prints the exact fix:
+The Linux binaries link libpcap statically (a minimal build, see `.github/libpcap/build.sh`), so they run on any glibc distro regardless of which libpcap soname it ships. They leave out libpcap's Bluetooth, D-Bus, USB and RDMA capture backends, so those pseudo-interfaces don't appear in the picker; build from source (below) if you need them.
 
-```sh
-sudo ln -s /usr/lib/libpcap.so.1 /usr/lib/libpcap.so.0.8
-```
-
-or just build from source (below), which always matches whatever libpcap your system actually has.
+Releases before static linking were built against Ubuntu's legacy `libpcap.so.0.8` soname and fail to launch on distros that only ship `libpcap.so.1` (e.g. Arch). The install script detects that and prints the fix (`sudo ln -s /usr/lib/libpcap.so.1 /usr/lib/libpcap.so.0.8`).
 
 ## Building
 
@@ -125,7 +122,7 @@ make setcap        # grant the built binary CAP_NET_RAW/CAP_NET_ADMIN once, so s
 make test          # go test ./...
 make test-race     # go test ./... -race
 make cover         # race + coverage, prints the per-function/aggregate summary
-make cover-check   # same, but fails if aggregate coverage drops below 90%
+make cover-check   # same, but fails if aggregate coverage drops below 90% or any package below its floor
 make fuzz          # short fuzz smoke pass across every Fuzz target (FUZZTIME=10s by default)
 make fmt           # gofmt -w .
 make lint          # golangci-lint run ./...
@@ -160,7 +157,13 @@ Without `-remote-iface`, tcpview runs `tcpdump -D` on the remote host over SSH a
 
 Every remote interface (and every switch) is its own `ssh` session, so key-based auth is strongly recommended over password prompts. An SSH `ControlMaster`/`ControlPersist` config for the host makes switching near-instant by reusing one connection.
 
-Requires SSH access to the host and `tcpdump` installed there (no root needed locally for this mode - the privilege requirement is on the remote end, where `tcpdump` runs).
+Requires SSH access to the host and `tcpdump` installed there (no root needed locally for this mode - the privilege requirement is on the remote end, where `tcpdump` runs). If you SSH in as a non-root user, pass the command to run instead, e.g. with passwordless sudo for tcpdump:
+
+```sh
+./tcpview -remote user@host -remote-tcpdump "sudo -n tcpdump"
+```
+
+The capture never includes its own SSH connection: tcpview asks the remote `tcpdump` to exclude it (from `$SSH_CONNECTION` on the remote side), so you don't see tcpview's own pcap stream, which would otherwise grow with every packet it forwards. Other SSH sessions to the host still show up as normal.
 
 ### Keybindings
 
@@ -173,7 +176,7 @@ Requires SSH access to the host and `tcpdump` installed there (no root needed lo
 | `esc` | cancel filter editing |
 | `←` / `→` | rewind backward / forward in time |
 | `L` | jump back to live |
-| `e` | export the currently shown (post-filter) packets to a pcap file |
+| `e` | export the currently shown (post-filter) packets to a pcapng file |
 | `?` | toggle the full keybinding help screen |
 | `q` | quit (editing a filter? just types a literal `q` instead; viewing detail/help? goes back) |
 | `ctrl+c` | quit immediately, from anywhere |
@@ -204,15 +207,20 @@ Precedence: an explicitly-passed CLI flag always wins over the config file, whic
 
 ## Development
 
-See `CLAUDE.md` for the testing policy (every package needs positive/negative/load/stress/chaos tests, >90% aggregate coverage) and architecture notes (why the archive isn't literal pcap format, why remote capture shells out to the remote's own `tcpdump` instead of needing an agent, etc).
+See `CLAUDE.md` for the testing policy (every package needs positive/negative/load/stress/chaos tests, >90% aggregate coverage, plus a per-package floor) and architecture notes (why the archive isn't literal pcap format, why remote capture shells out to the remote's own `tcpdump` instead of needing an agent, etc).
 
 ```sh
-make check   # fmt-check, vet, golangci-lint, race-enabled tests, 90% coverage gate - everything CI runs
+make check   # fmt-check, vet, golangci-lint, race-enabled tests, coverage gates - most of what CI runs
 ```
 
-Every parser-like function (filter expressions, packet decoding, archive file parsing, the `/proc/self/status` capability parser) also has a native Go fuzz test (`make fuzz` for a quick local smoke pass); CI runs a short fuzz pass on every push, and the project has been fuzzed for 5M+ executions locally with zero crashes found.
+Every parser-like function (filter expressions, packet decoding, archive file parsing, remote `tcpdump -D` output, the `/proc/self/status` capability parser) also has a native Go fuzz test (`make fuzz` for a quick local smoke pass); CI runs a short fuzz pass on every push, and the project has been fuzzed for 5M+ executions locally with zero crashes found.
 
 ### CI / releases
 
-- `.github/workflows/ci.yml` runs on every push/PR: build, `gofmt` check, `go vet`, `golangci-lint`, race-enabled tests, a 90%-aggregate-coverage gate, and a fuzz smoke pass.
-- `.github/workflows/release.yml` runs on any `vX.Y.Z` tag push: builds native binaries for linux/amd64, darwin/amd64, and darwin/arm64, and publishes them as a GitHub Release.
+- `.github/workflows/ci.yml` runs on every push/PR: build, `gofmt` check, `go vet`, `golangci-lint`, race-enabled tests, coverage gates (`scripts/coverage-gate.sh`: 90% aggregate, 85% per `internal/` package, 75% for the root package), `govulncheck`, and a fuzz smoke pass on Linux; race-enabled tests on macOS; and the release's static-libpcap Linux build, so a break there shows up before a tag does.
+- `.github/workflows/release.yml` runs on any `vX.Y.Z` tag push: builds native binaries for linux/amd64, linux/arm64, darwin/amd64, and darwin/arm64, and publishes them as a GitHub Release with a `SHA256SUMS` file.
+- `.github/dependabot.yml` opens weekly update PRs for Go modules and the Actions the workflows use.
+
+## License
+
+MIT - see [LICENSE](LICENSE).

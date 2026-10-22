@@ -63,6 +63,7 @@ func run(args []string, stderr *os.File) int {
 	fs := flag.NewFlagSet("tcpview", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	remoteHost := fs.String("remote", "", "capture on a remote host over SSH, e.g. user@host")
+	remoteTcpdump := fs.String("remote-tcpdump", "tcpdump", `remote tcpdump command (with -remote), e.g. "sudo -n tcpdump" when the SSH user isn't root`)
 	remoteIface := fs.String("remote-iface", "", "remote interface to start capturing on (with -remote; omit to pick from the remote's interface list)")
 	archiveDir := fs.String("archive-dir", defaultArchiveDir(), "directory for the on-disk rewind archive")
 	archiveCapGiB := fs.Float64("archive-cap-gib", 1.0, "max total disk space (GiB) the rewind archive may use")
@@ -97,7 +98,7 @@ func run(args []string, stderr *os.File) int {
 	}
 
 	if *remoteHost != "" {
-		return runRemote(*remoteHost, *remoteIface, ac, stderr)
+		return runRemote(remote.Options{Host: *remoteHost, Iface: *remoteIface, TcpdumpPath: *remoteTcpdump}, ac, stderr)
 	}
 	return runLocal(ac, stderr)
 }
@@ -134,14 +135,19 @@ func setupArchive(ac archiveConfig) (*store.Archive, *store.ArchiveReader, error
 	return a, store.NewArchiveReader(ac.dir), nil
 }
 
-func runRemote(host, iface string, ac archiveConfig, stderr *os.File) int {
+// runRemote captures on opts.Host; opts.Iface, if set, is the interface
+// to start on.
+func runRemote(opts remote.Options, ac archiveConfig, stderr *os.File) int {
+	host, iface := opts.Host, opts.Iface
 	open := func(name string) (capture.Source, error) {
-		return newRemoteSource(remote.Options{Host: host, Iface: name})
+		o := opts
+		o.Iface = name
+		return newRemoteSource(o)
 	}
 
 	// The remote's interface list feeds the picker (no -remote-iface) or
 	// tab switching (with one). Only the former can't do without it.
-	ifaces, listErr := listRemoteInterfaces(remote.Options{Host: host})
+	ifaces, listErr := listRemoteInterfaces(opts)
 
 	var m ui.Model
 	if iface == "" {

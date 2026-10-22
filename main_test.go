@@ -204,6 +204,28 @@ func TestRun_RemoteWithIfaceEnablesSwitching(t *testing.T) {
 	})
 }
 
+func TestRun_RemoteTcpdumpFlagReachesListAndCapture(t *testing.T) {
+	t.Parallel()
+	withStubs(t, nil, nil, func(captured *tea.Model) {
+		var seen []string
+		listRemoteInterfaces = func(opts remote.Options) ([]capture.Interface, error) {
+			seen = append(seen, "list:"+opts.TcpdumpPath)
+			return []capture.Interface{{Name: "eth0"}}, nil
+		}
+		newRemoteSource = func(opts remote.Options) (capture.Source, error) {
+			seen = append(seen, "capture:"+opts.TcpdumpPath)
+			return newNoopSource(), nil
+		}
+		code := run([]string{"-remote", "box", "-remote-iface", "eth0", "-remote-tcpdump", "sudo -n tcpdump"}, devNull(t))
+		if code != 0 {
+			t.Fatalf("run() = %d, want 0", code)
+		}
+		if got := strings.Join(seen, ","); got != "list:sudo -n tcpdump,capture:sudo -n tcpdump" {
+			t.Fatalf("tcpdump command seen = %s, want it on both the list and the capture", got)
+		}
+	})
+}
+
 // --- negative ---
 
 func TestRun_ArchiveSetupErrorSkipsTea(t *testing.T) {

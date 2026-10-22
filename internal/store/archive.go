@@ -3,7 +3,9 @@ package store
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -254,10 +256,30 @@ func NewArchiveReader(dir string) *ArchiveReader {
 	return &ArchiveReader{dir: dir}
 }
 
+// CorruptLinesError is returned by Range alongside the packets it could
+// read when some archive lines didn't decode (a write cut off by a crash,
+// disk corruption, a manual edit). Those lines are skipped rather than
+// failing the whole query, so one bad line never hides the rest of the
+// archive from rewind.
+type CorruptLinesError struct {
+	Lines int // how many lines were skipped
+}
+
+func (e *CorruptLinesError) Error() string {
+	return fmt.Sprintf("store: skipped %d corrupt archive line(s)", e.Lines)
+}
+
 // Range returns archived packets with Time in [from, to], oldest first.
 // Files are named by their first packet's timestamp and read in that
-// order; reading stops early once a file's own start time is already past
-// `to`, since every later file (by name) starts later still.
+// order, so only files overlapping the window are read: a file is skipped
+// when the next one already starts before `from` (everything in it is
+// older still), and reading stops once a file starts after `to`. Without
+// that, every rewind query re-decoded the whole archive from its oldest
+// file - over a second per query on a ~80 MiB archive.
+//
+// If some lines were corrupt, Range still returns every packet it could
+// decode, together with a *CorruptLinesError. Any other error means the
+// query itself failed and the packets are nil.
 func (r *ArchiveReader) Range(from, to time.Time) ([]Packet, error) {
 	files, err := listArchiveFiles(r.dir)
 	if err != nil {
@@ -265,15 +287,25 @@ func (r *ArchiveReader) Range(from, to time.Time) ([]Packet, error) {
 	}
 
 	var out []Packet
-	for _, f := range files {
+	corrupt := 0
+	for i, f := range files {
 		start, ok := parseArchiveFileStart(f.name)
 		if ok && start.After(to) {
 			break
 		}
-		pkts, err := readArchiveFile(f.path)
+		if i+1 < len(files) {
+			if next, ok := parseArchiveFileStart(files[i+1].name); ok && next.Before(from) {
+				continue
+			}
+		}
+		pkts, skipped, err := readArchiveFile(f.path)
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // evicted by the writer between listing and reading
+			}
 			return nil, err
 		}
+		corrupt += skipped
 		for _, p := range pkts {
 			if !p.Time.Before(from) && !p.Time.After(to) {
 				out = append(out, p)
@@ -281,6 +313,9 @@ func (r *ArchiveReader) Range(from, to time.Time) ([]Packet, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	if corrupt > 0 {
+		return out, &CorruptLinesError{Lines: corrupt}
+	}
 	return out, nil
 }
 
@@ -293,14 +328,15 @@ func parseArchiveFileStart(name string) (time.Time, bool) {
 	return t, true
 }
 
-func readArchiveFile(path string) ([]Packet, error) {
+// readArchiveFile decodes every line of the archive file at path,
+// skipping (and counting) lines that aren't a valid Packet.
+func readArchiveFile(path string) (pkts []Packet, skipped int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("store: open archive file %s: %w", path, err)
+		return nil, 0, fmt.Errorf("store: open archive file %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }() // read-only handle; a close error here is inconsequential
 
-	var out []Packet
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 16<<20) // allow for large payload packets
 	for scanner.Scan() {
@@ -310,12 +346,13 @@ func readArchiveFile(path string) ([]Packet, error) {
 		}
 		var p Packet
 		if err := json.Unmarshal(line, &p); err != nil {
-			return nil, fmt.Errorf("store: decode archived packet in %s: %w", path, err)
+			skipped++
+			continue
 		}
-		out = append(out, p)
+		pkts = append(pkts, p)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("store: scan archive file %s: %w", path, err)
+		return nil, 0, fmt.Errorf("store: scan archive file %s: %w", path, err)
 	}
-	return out, nil
+	return pkts, skipped, nil
 }

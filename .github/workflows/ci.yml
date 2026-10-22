@@ -53,20 +53,26 @@ jobs:
       - name: Test (race + coverage)
         run: go test ./... -race -covermode=atomic -coverprofile=coverage.out
 
-      - name: Coverage gate (aggregate >= 90%)
+      - name: Coverage gate (aggregate >= 90%, per-package floors)
         run: |
-          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
-          echo "Aggregate line coverage: ${total}%"
-          echo "### Coverage: ${total}%" >> "$GITHUB_STEP_SUMMARY"
-          go tool cover -func=coverage.out | tail -20 >> "$GITHUB_STEP_SUMMARY"
-          awk -v c="$total" 'BEGIN { exit (c + 0 >= 90) ? 0 : 1 }' \
-            || { echo "Aggregate coverage ${total}% is below the 90% gate"; exit 1; }
+          set -o pipefail
+          {
+            echo "### Coverage"
+            echo '```'
+            sh scripts/coverage-gate.sh coverage.out
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage
           path: coverage.out
+
+      - name: govulncheck
+        # Pinned for the same reason as golangci-lint above: older
+        # releases refuse this module's go directive.
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
       - name: Fuzz smoke tests
         run: |
@@ -77,3 +83,56 @@ jobs:
           go test ./internal/store/... -run=^$ -fuzz=FuzzReadArchiveFile -fuzztime=10s
           go test ./internal/remote/... -run=^$ -fuzz=FuzzParseTcpdumpList -fuzztime=10s
           go test . -run=^$ -fuzz=FuzzParseCapEff -fuzztime=10s
+
+  test-macos:
+    # The release builds darwin binaries too; without this, a Mac-only
+    # failure would first surface when a release tag is pushed.
+    name: test (macOS)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Install libpcap
+        run: brew install libpcap
+
+      - name: Test (race)
+        run: go test ./... -race
+
+  static-build:
+    # Exercises the release's Linux build path (static libpcap, see
+    # .github/libpcap/build.sh) on every change, not just at release time.
+    name: static Linux build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Build static libpcap
+        run: |
+          sudo apt-get update && sudo apt-get install -y flex bison
+          .github/libpcap/build.sh "$RUNNER_TEMP/libpcap"
+
+      - name: Build and check linkage
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          export CGO_CFLAGS="-I$RUNNER_TEMP/libpcap/include" CGO_LDFLAGS="-L$RUNNER_TEMP/libpcap/lib"
+          go build -o tcpview .
+          ldd tcpview
+          if ldd tcpview | grep -q libpcap; then
+            echo "tcpview still links libpcap dynamically"; exit 1
+          fi
+          go test ./...

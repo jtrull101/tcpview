@@ -58,7 +58,7 @@ type Options struct {
 	Host        string        // e.g. "user@host", passed straight to the ssh binary
 	Iface       string        // remote interface name to capture on
 	SSHBinary   string        // default "ssh"
-	TcpdumpPath string        // default "tcpdump"
+	TcpdumpPath string        // remote tcpdump command, default "tcpdump"; may carry a prefix, e.g. "sudo -n tcpdump"
 	Backoff     time.Duration // initial reconnect backoff, default 1s
 	MaxBackoff  time.Duration // reconnect backoff cap, default 30s
 
@@ -86,11 +86,37 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
+// captureScript runs on the remote host under sh, with the interface as
+// $1 and the tcpdump command as $2 (deliberately unquoted when run, so a
+// prefix like "sudo -n tcpdump" splits into words).
+//
+// It excludes this SSH session's own connection from the capture: the
+// pcap stream flows back over that connection, so on the interface SSH
+// uses, capturing it would show tcpview's own traffic - and every
+// forwarded packet would generate more packets to forward. sshd sets
+// $SSH_CONNECTION to "client_ip client_port server_ip server_port" as
+// the remote side sees them (so NAT and jump hosts are already
+// accounted for); if it's somehow unset, capture runs unfiltered rather
+// than failing.
+const captureScript = `set -- "$1" "$2" $SSH_CONNECTION; ` +
+	`if [ -n "$4" ]; then exec $2 -i "$1" -U -w - "not (host $3 and port $4)"; ` +
+	`else exec $2 -i "$1" -U -w -; fi`
+
 func (o Options) buildCmd() *exec.Cmd {
 	if o.cmdFactory != nil {
 		return o.cmdFactory()
 	}
-	return exec.Command(o.SSHBinary, o.Host, o.TcpdumpPath, "-i", o.Iface, "-U", "-w", "-")
+	// ssh joins its arguments with spaces and hands the result to the
+	// remote user's login shell, which may not be POSIX (fish, csh), so
+	// the script runs under an explicit sh with every value passed as a
+	// single-quoted positional argument rather than spliced into it.
+	return exec.Command(o.SSHBinary, o.Host, "sh", "-c", shellQuote(captureScript), "tcpview", shellQuote(o.Iface), shellQuote(o.TcpdumpPath))
+}
+
+// shellQuote single-quotes s for a remote shell, the portable way:
+// close the quote, emit an escaped ', reopen.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // SSH captures packets from a remote host by running tcpdump over an SSH
@@ -259,6 +285,7 @@ func (s *SSH) pump(r *pcapgo.Reader) error {
 			}
 			continue
 		}
+		p.LinkType, p.HasLinkType = uint16(r.LinkType()), true
 		select {
 		case s.packets <- p:
 		case <-s.done:

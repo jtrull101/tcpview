@@ -1,9 +1,12 @@
 package store
 
 import (
+	"encoding/json"
+	"errors"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -245,9 +248,9 @@ func TestReadArchiveFile_SkipsBlankLines(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile error: %v", err)
 	}
-	pkts, err := readArchiveFile(path)
-	if err != nil {
-		t.Fatalf("readArchiveFile error: %v", err)
+	pkts, skipped, err := readArchiveFile(path)
+	if err != nil || skipped != 0 {
+		t.Fatalf("readArchiveFile error=%v skipped=%d", err, skipped)
 	}
 	if len(pkts) != 2 {
 		t.Fatalf("len(pkts) = %d, want 2 (blank line skipped)", len(pkts))
@@ -287,21 +290,26 @@ func TestArchiveReader_RangeOutsideWindowReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestReadArchiveFile_CorruptLineErrors(t *testing.T) {
+func TestReadArchiveFile_CorruptLinesSkippedAndCounted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "corrupt.jsonl")
-	if err := os.WriteFile(path, []byte("not valid json\n"), 0o644); err != nil {
+	content := "not valid json\n" + `{"Time":"2026-01-01T00:00:00Z","Summary":"a"}` + "\n" + `{"Time":"2026-01-01T00:0` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile error: %v", err)
 	}
-	if _, err := readArchiveFile(path); err == nil {
-		t.Fatal("readArchiveFile on a corrupt line returned no error")
+	pkts, skipped, err := readArchiveFile(path)
+	if err != nil {
+		t.Fatalf("readArchiveFile error: %v", err)
+	}
+	if len(pkts) != 1 || skipped != 2 {
+		t.Fatalf("got %d packets, %d skipped; want 1 good packet and 2 skipped lines", len(pkts), skipped)
 	}
 }
 
 func TestReadArchiveFile_MissingFileErrors(t *testing.T) {
 	t.Parallel()
-	if _, err := readArchiveFile(filepath.Join(t.TempDir(), "nope.jsonl")); err == nil {
+	if _, _, err := readArchiveFile(filepath.Join(t.TempDir(), "nope.jsonl")); err == nil {
 		t.Fatal("readArchiveFile on a missing file returned no error")
 	}
 }
@@ -591,5 +599,154 @@ func TestArchive_Chaos_RandomPacketsRoundTripWithoutPanicking(t *testing.T) {
 				t.Fatalf("Write error at i=%d: %v", i, err)
 			}
 		}()
+	}
+}
+
+// --- rewind query cost and corruption tolerance ---
+
+// writeArchiveFile writes pkts as one archive file named for start, the
+// way Archive.rotateLocked names them.
+func writeArchiveFile(t *testing.T, dir string, start time.Time, lines ...string) {
+	t.Helper()
+	name := archivePrefix + start.UTC().Format(archiveTimeLayout) + archiveSuffix
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write archive file: %v", err)
+	}
+}
+
+func packetLine(t *testing.T, at time.Time, summary string) string {
+	t.Helper()
+	b, err := json.Marshal(archivePacket(at, summary))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}
+
+func TestArchiveReader_Range_SkipsFilesEndingBeforeWindow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	// An unreadable-if-opened "old" file: if Range opened it the query
+	// would report corruption, proving it wasn't skipped.
+	writeArchiveFile(t, dir, base, "garbage that would count as corrupt")
+	writeArchiveFile(t, dir, base.Add(time.Minute), packetLine(t, base.Add(90*time.Second), "in-window"))
+
+	// The next file starts before the window, so the first can't overlap it.
+	got, err := NewArchiveReader(dir).Range(base.Add(80*time.Second), base.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("Range error %v - the file ending before the window was read", err)
+	}
+	if len(got) != 1 || got[0].Summary != "in-window" {
+		t.Fatalf("Range = %+v, want just the in-window packet", got)
+	}
+}
+
+func TestArchiveReader_Range_ReadsFileSpanningWindowStart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	// File 1 starts before the window but runs into it; it must be read.
+	writeArchiveFile(t, dir, base, packetLine(t, base, "before"), packetLine(t, base.Add(90*time.Second), "spanning"))
+	writeArchiveFile(t, dir, base.Add(2*time.Minute), packetLine(t, base.Add(2*time.Minute), "later"))
+
+	got, err := NewArchiveReader(dir).Range(base.Add(time.Minute), base.Add(3*time.Minute))
+	if err != nil {
+		t.Fatalf("Range error: %v", err)
+	}
+	if len(got) != 2 || got[0].Summary != "spanning" || got[1].Summary != "later" {
+		t.Fatalf("Range = %+v, want spanning then later", got)
+	}
+}
+
+func TestArchiveReader_Range_CorruptLinesReturnPacketsAndCount(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	writeArchiveFile(t, dir, base, packetLine(t, base, "a"), `{"Time":"2026-01-01T12:00:0`, packetLine(t, base.Add(time.Second), "b"))
+
+	got, err := NewArchiveReader(dir).Range(base.Add(-time.Minute), base.Add(time.Minute))
+	var corrupt *CorruptLinesError
+	if !errors.As(err, &corrupt) || corrupt.Lines != 1 {
+		t.Fatalf("Range err = %v, want a CorruptLinesError counting 1 line", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Range returned %d packets alongside the corruption, want both good ones", len(got))
+	}
+	if !strings.Contains(err.Error(), "1 corrupt") {
+		t.Fatalf("error text %q doesn't say how many lines were skipped", err)
+	}
+}
+
+// TestArchiveReader_Load_QueryCostIndependentOfArchiveAge: a rewind query
+// near the newest end must not re-read the whole archive, so it stays
+// fast however much older history has piled up.
+func TestArchiveReader_Load_QueryCostIndependentOfArchiveAge(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a, err := NewArchive(ArchiveOptions{Dir: dir, MaxFileBytes: 1 << 20, MaxTotalBytes: 64 << 20})
+	if err != nil {
+		t.Fatalf("NewArchive error: %v", err)
+	}
+	raw := make([]byte, 200)
+	base := time.Now().Add(-time.Hour)
+	const n = 100000
+	for i := 0; i < n; i++ {
+		p := archivePacket(base.Add(time.Duration(i)*time.Millisecond), "p")
+		p.Raw = raw
+		if err := a.Write(p); err != nil {
+			t.Fatalf("Write error: %v", err)
+		}
+	}
+	_ = a.Close()
+
+	at := base.Add(time.Duration(n-2000) * time.Millisecond)
+	start := time.Now()
+	got, err := NewArchiveReader(dir).Range(at.Add(-500*time.Millisecond), at.Add(500*time.Millisecond))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Range error: %v", err)
+	}
+	if len(got) != 1001 {
+		t.Fatalf("Range returned %d packets, want 1001", len(got))
+	}
+	files, _ := listArchiveFiles(dir)
+	t.Logf("query over %d files took %v", len(files), elapsed)
+	if len(files) < 10 {
+		t.Fatalf("setup only produced %d archive files; the test needs many to mean anything", len(files))
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("Range near the newest end took %v - it's reading files outside the window", elapsed)
+	}
+}
+
+// TestArchiveReader_Chaos_FileEvictedMidQuery: the writer deletes the
+// oldest file while a reader is between listing and opening it.
+func TestArchiveReader_Chaos_FileEvictedMidQuery(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	writeArchiveFile(t, dir, base, packetLine(t, base, "a"))
+	writeArchiveFile(t, dir, base.Add(time.Second), packetLine(t, base.Add(time.Second), "b"))
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 200)
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i == 100 {
+				_ = os.Remove(filepath.Join(dir, archivePrefix+base.UTC().Format(archiveTimeLayout)+archiveSuffix))
+				return
+			}
+			if _, err := NewArchiveReader(dir).Range(base.Add(-time.Minute), base.Add(time.Minute)); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("Range failed while a file was evicted: %v", err)
 	}
 }

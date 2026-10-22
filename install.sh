@@ -36,12 +36,6 @@ arch() {
 OS="$(os)"
 ARCH="$(arch)"
 
-if [ "$OS" = "linux" ] && [ "$ARCH" = "arm64" ]; then
-	echo "tcpview: no prebuilt linux/arm64 binary yet - build from source instead:" >&2
-	echo "  git clone https://github.com/${REPO}.git && cd tcpview && go build -o tcpview ." >&2
-	exit 1
-fi
-
 VERSION="${VERSION:-}"
 if [ -z "$VERSION" ]; then
 	VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -59,6 +53,30 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "tcpview: downloading ${URL}"
 curl -fsSL "$URL" -o "${TMPDIR}/${ASSET}"
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# Releases publish SHA256SUMS alongside the binaries; refuse to install
+# anything that doesn't match it. Releases older than that file just
+# get a warning.
+if curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS" -o "${TMPDIR}/SHA256SUMS" 2>/dev/null; then
+	WANT="$(grep " ${ASSET}\$" "${TMPDIR}/SHA256SUMS" | cut -d' ' -f1)"
+	GOT="$(sha256 "${TMPDIR}/${ASSET}")"
+	if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
+		echo "tcpview: checksum mismatch for ${ASSET} (expected ${WANT:-nothing listed}, got ${GOT}) - not installing" >&2
+		exit 1
+	fi
+	echo "tcpview: checksum verified"
+else
+	echo "tcpview: warning - ${VERSION} publishes no SHA256SUMS, skipping checksum verification" >&2
+fi
+
 tar -xzf "${TMPDIR}/${ASSET}" -C "$TMPDIR"
 
 mkdir -p "$INSTALL_DIR"
@@ -75,8 +93,9 @@ if [ "$OS" = "linux" ]; then
 	if ldd "${INSTALL_DIR}/tcpview" 2>&1 | grep -q 'libpcap\.so\.0\.8 => not found'; then
 		LIBPCAP1="$(find /usr/lib /usr/lib64 /lib /lib64 -name 'libpcap.so.1' 2>/dev/null | head -1)"
 		echo "" >&2
-		echo "tcpview: your system has libpcap.so.1 but this binary needs the legacy" >&2
-		echo "  libpcap.so.0.8 soname (a quirk of the Ubuntu runner it was built on)." >&2
+		echo "tcpview: your system has libpcap.so.1 but this (older) release needs the" >&2
+		echo "  legacy libpcap.so.0.8 soname (a quirk of the Ubuntu runner it was built on;" >&2
+		echo "  newer releases link libpcap statically and don't have this problem)." >&2
 		if [ -n "$LIBPCAP1" ]; then
 			echo "  Fix: sudo ln -s ${LIBPCAP1} $(dirname "$LIBPCAP1")/libpcap.so.0.8" >&2
 		fi
