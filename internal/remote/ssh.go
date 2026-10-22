@@ -259,6 +259,7 @@ func (s *SSH) pump(r *pcapgo.Reader) error {
 			}
 			continue
 		}
+		p.LinkType, p.HasLinkType = uint16(r.LinkType()), true
 		select {
 		case s.packets <- p:
 		case <-s.done:

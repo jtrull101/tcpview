@@ -264,7 +264,7 @@ func TestModel_ViewWithErrorSet(t *testing.T) {
 
 func TestEndpoint_ZeroPortOmitted(t *testing.T) {
 	t.Parallel()
-	if got := endpoint("10.0.0.1", 0); got != "10.0.0.1" {
+	if got := endpoint(netip.MustParseAddr("10.0.0.1"), 0); got != "10.0.0.1" {
 		t.Fatalf("endpoint with zero port = %q, want bare IP", got)
 	}
 }
@@ -301,8 +301,11 @@ func TestWaitForSourceErr_DeliversError(t *testing.T) {
 
 func TestEndpoint_InvalidIPShowsPlaceholder(t *testing.T) {
 	t.Parallel()
-	if got := endpoint("invalid IP", 80); got != "?:80" {
+	if got := endpoint(netip.Addr{}, 80); got != "?:80" {
 		t.Fatalf("endpoint(invalid IP, 80) = %q, want ?:80", got)
+	}
+	if got := endpoint(netip.Addr{}, 0); got != "?" {
+		t.Fatalf("endpoint(invalid IP, 0) = %q, want ?", got)
 	}
 }
 
@@ -482,5 +485,51 @@ func TestModel_Chaos_InterleavedPacketsAndErrorsOutOfOrder(t *testing.T) {
 			mUpdated, _ := m.Update(msg)
 			m = mUpdated.(Model)
 		}()
+	}
+}
+
+func TestEndpoint_IPv6WithPortIsBracketed(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"2001:db8::1|443":    "[2001:db8::1]:443",
+		"2001:db8::1|0":      "2001:db8::1",
+		"::ffff:10.0.0.1|80": "[::ffff:10.0.0.1]:80",
+		"fe80::1%eth0|546":   "[fe80::1%eth0]:546",
+		"10.0.0.1|65535":     "10.0.0.1:65535",
+	}
+	for in, want := range cases {
+		addr, port, _ := strings.Cut(in, "|")
+		var p uint16
+		fmt.Sscan(port, &p)
+		if got := endpoint(netip.MustParseAddr(addr), p); got != want {
+			t.Errorf("endpoint(%s, %d) = %q, want %q", addr, p, got, want)
+		}
+	}
+}
+
+func TestAddrWidthFor_GrowsWithTerminalWithinBounds(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ term, want int }{
+		{0, minAddrWidth}, {-5, minAddrWidth}, {80, minAddrWidth},
+		{fixedColsWidth + 2*30, 30}, {fixedColsWidth + 2*maxAddrWidth, maxAddrWidth}, {1000, maxAddrWidth},
+	}
+	for _, c := range cases {
+		if got := addrWidthFor(c.term); got != c.want {
+			t.Errorf("addrWidthFor(%d) = %d, want %d", c.term, got, c.want)
+		}
+	}
+}
+
+func TestModel_WideTerminalShowsFullIPv6Endpoint(t *testing.T) {
+	t.Parallel()
+	m := NewModelWithSource("eth0", newFakeSource())
+	m, _ = update(t, m, tea.WindowSizeMsg{Width: 140, Height: 30})
+	p := samplePacket(1)
+	p.SrcIP = netip.MustParseAddr("2001:db8:85a3::8a2e:370:7334")
+	p.SrcPort = 51234
+	m, _ = update(t, m, packetMsg(p))
+	m, _ = update(t, m, tickMsg(time.Now()))
+	if out := m.View(); !strings.Contains(out, "[2001:db8:85a3::8a2e:370:7334]:51234") {
+		t.Fatalf("View() = %q, want the full bracketed IPv6 endpoint", out)
 	}
 }

@@ -44,6 +44,15 @@ type Packet struct {
 	Length  int
 	Summary string
 	Raw     []byte
+
+	// LinkType is the pcap LINKTYPE_* value Raw was captured with (1 =
+	// Ethernet, 113 = Linux "cooked" capture as used by the "any" device,
+	// 0 = BSD loopback, ...), meaningful only when HasLinkType is set:
+	// Packets from archives written before this field existed, or built
+	// by hand, don't carry one. Export needs it to label each frame
+	// correctly, since one capture session can span several link types.
+	LinkType    uint16 `json:",omitempty"`
+	HasLinkType bool   `json:",omitempty"`
 }
 
 // Valid reports whether p looks like a populated Packet rather than a zero
