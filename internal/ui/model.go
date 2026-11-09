@@ -70,6 +70,15 @@ type Model struct {
 	displayed []store.Packet
 	selected  store.Packet
 
+	// pickerReturn distinguishes the picker shown at startup (nothing to go
+	// back to; esc does nothing) from the picker reopened mid-capture with
+	// "i" (esc returns to the live view). pickerSaved is the interface
+	// capture is actually on while the picker browses, since cursor doubles
+	// as the picker's cursor and would otherwise leave the live view
+	// pointing at whatever was last highlighted when the user cancels.
+	pickerReturn bool
+	pickerSaved  int
+
 	filterBar filterBarState
 	timeline  timelineState
 
@@ -356,18 +365,41 @@ func (m Model) canSwitchInterface() bool {
 	return m.open != nil && len(m.ifaces) > 1
 }
 
+// openPicker reopens the interface list from the live view ("i"), so
+// reaching a specific interface doesn't mean tabbing through every one in
+// between - each tab tears down a capture and empties the ring, so
+// cycling past four interfaces to reach the fifth throws away four
+// captures. Capture keeps running untouched until a choice is made.
+func (m *Model) openPicker() {
+	if !m.canSwitchInterface() {
+		return
+	}
+	m.pickerReturn = true
+	m.pickerSaved = m.cursor
+	m.err = nil
+	m.state = viewPickInterface
+}
+
 // switchInterface moves capture delta positions through the interface
-// list (wrapping at either end), local or remote alike: it closes the
-// current source, hands the in-memory ring off to the archive (if
-// enabled, so rewind can still reach the previous interface's traffic)
-// and starts the view fresh for the new interface. The active filter is
-// kept, same as it survives everything else.
+// list, wrapping at either end.
 func (m *Model) switchInterface(delta int) tea.Cmd {
 	if !m.canSwitchInterface() {
 		return nil
 	}
 	n := len(m.ifaces)
-	m.cursor = ((m.cursor+delta)%n + n) % n
+	return m.switchToIndex(((m.cursor+delta)%n + n) % n)
+}
+
+// switchToIndex moves capture to ifaces[i], local or remote alike: it
+// closes the current source, hands the in-memory ring off to the archive
+// (if enabled, so rewind can still reach the previous interface's
+// traffic) and starts the view fresh for the new interface. The active
+// filter is kept, same as it survives everything else.
+func (m *Model) switchToIndex(i int) tea.Cmd {
+	if !m.canSwitchInterface() {
+		return nil
+	}
+	m.cursor = i
 	name := m.ifaces[m.cursor].Name
 	m.label = m.ifaceLabel(m.ifaces[m.cursor].DisplayName())
 	m.err = nil
@@ -432,6 +464,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.source = msg.source
 		m.state = viewLiveTail
 		m.status = ""
+		// A successful open supersedes whatever the last failed one left
+		// behind, which would otherwise sit in the live view forever.
+		m.err = nil
 		cmds := []tea.Cmd{waitForPacket(m.source), waitForSourceErr(m.source)}
 		if !m.ticking {
 			m.ticking = true
@@ -534,9 +569,29 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 			return m, nil
+		case "esc":
+			// Only meaningful for the picker reopened mid-capture; at
+			// startup there's no live view to go back to.
+			if m.pickerReturn {
+				m.pickerReturn = false
+				m.cursor = m.pickerSaved
+				m.state = viewLiveTail
+			}
+			return m, nil
 		case "enter":
 			if len(m.ifaces) == 0 {
 				return m, nil
+			}
+			if m.pickerReturn {
+				m.pickerReturn = false
+				// Re-picking the interface already being captured would
+				// otherwise reopen the source and empty the ring, losing
+				// the packets on screen for no change at all.
+				if m.cursor == m.pickerSaved {
+					m.state = viewLiveTail
+					return m, nil
+				}
+				return m, m.switchToIndex(m.cursor)
 			}
 			name := m.ifaces[m.cursor].Name
 			m.label = m.ifaceLabel(m.ifaces[m.cursor].DisplayName())
@@ -578,6 +633,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.switchInterface(1)
 	case "shift+tab":
 		return m, m.switchInterface(-1)
+	case "i":
+		m.openPicker()
+		return m, nil
 	case "?":
 		m.state = viewHelp
 		return m, nil
@@ -717,9 +775,10 @@ const helpText = `tcpview - keybindings
 
   up/down, j/k    move the table cursor / interface picker cursor
   enter           view packet detail (live-tail) / select interface (picker)
+  i               reopen the interface list to pick one directly
   tab / shift+tab switch capture to the next / previous interface
   /               edit the filter
-  esc             cancel filter editing
+  esc             cancel filter editing / leave the interface list as-is
   left / right    rewind backward / forward in time
   L               jump back to live
   e               export the currently shown packets to a pcap file
@@ -771,7 +830,11 @@ func (m Model) viewPicker() string {
 			fmt.Fprintf(&b, "%s%-*s %s\n", cursor, width, name, iface.Description)
 		}
 	}
-	b.WriteString("\n↑/↓ move  enter select  q quit\n")
+	if m.pickerReturn {
+		fmt.Fprintf(&b, "\n↑/↓ move  enter select  esc keep %s  q quit\n", m.ifaceLabel(m.ifaces[m.pickerSaved].DisplayName()))
+	} else {
+		b.WriteString("\n↑/↓ move  enter select  q quit\n")
+	}
 	if m.err != nil {
 		fmt.Fprintf(&b, "\nerror: %v\n", m.err)
 	}
@@ -786,7 +849,7 @@ func (m Model) viewLiveTail() string {
 	}
 	current := m.label
 	if m.canSwitchInterface() {
-		current = fmt.Sprintf("%s [%d/%d, tab/shift+tab to switch]", m.label, m.cursor+1, len(m.ifaces))
+		current = fmt.Sprintf("%s [%d/%d, i to choose, tab to cycle]", m.label, m.cursor+1, len(m.ifaces))
 	}
 	fmt.Fprintf(&b, "tcpview - %s: %s  (%d packets shown)\n\n", modeLabel, current, len(m.table.Rows()))
 	b.WriteString(m.table.View())
