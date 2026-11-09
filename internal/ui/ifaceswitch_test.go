@@ -197,7 +197,7 @@ func TestIfaceSwitch_ViewShowsPositionAndHelpMentionsTab(t *testing.T) {
 	t.Parallel()
 	m, _ := liveOn(t, 3)
 	m = press(t, m, "tab")
-	if out := m.View(); !strings.Contains(out, "eth1 [2/3") || !strings.Contains(out, "tab/shift+tab") {
+	if out := m.View(); !strings.Contains(out, "eth1 [2/3") || !strings.Contains(out, "tab to cycle") {
 		t.Fatalf("View() = %q, want the interface position and switch hint", out)
 	}
 	if !strings.Contains(helpText, "tab / shift+tab") {

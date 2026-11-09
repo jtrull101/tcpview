@@ -30,7 +30,7 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
 ## Features
 
 - **Live capture** on a local interface via libpcap, or on a **remote host over SSH** (`ssh <host> tcpdump -i <iface> -U -w -`, piped and decoded locally - no agent to install on the remote box, just SSH access and `tcpdump`). The SSH connection carrying the capture is filtered out of it automatically.
-- **Live interface switching** - press `tab` / `shift+tab` mid-capture to cycle through interfaces without restarting, locally or on a remote host.
+- **Live interface switching** - press `i` mid-capture to reopen the interface list and jump straight to any interface, or `tab` / `shift+tab` to cycle to the next / previous one, without restarting - locally or on a remote host.
 - **Interactive filtering** - press `/` and type a simple expression like `proto=tcp dport=443 src=10.0.0.0/24`, applied live against whatever's currently buffered.
 - **Rewind** - press `←` to scrub backward through traffic that already scrolled off, `→` to scrub forward, `L` to jump back to live. Recent traffic is served from an in-memory ring; anything older comes from a bounded on-disk archive (see below).
 - **Packet detail** - press `enter` on any row for a parsed field breakdown plus a hex+ASCII dump of the raw frame.
@@ -49,7 +49,9 @@ Launching with no arguments lists every capturable interface by name and descrip
 
 ### Flip through interfaces without restarting
 
-That first pick isn't final: once capturing, `tab` / `shift+tab` moves capture to the next / previous interface in the same list (wrapping at either end), so you can flip through every interface to see where traffic is actually flowing. The header always shows which one you're on. Here `shift+tab` has moved from the loopback capture above to `eth0`, where the only traffic is HTTPS out to the internet:
+That first pick isn't final. Press `i` to bring the interface list back up with the cursor on whatever you're capturing now, and `enter` to move capture straight there - handy when the box has ten interfaces and the one you want isn't adjacent. `esc` leaves the list without disturbing the running capture, and re-picking the current interface is a no-op rather than a restart.
+
+For stepping between neighbours there's still `tab` / `shift+tab`, which moves capture to the next / previous interface in the same list, wrapping at either end. Bear in mind each step is a real switch: it closes the current capture and empties the view, so reaching a distant interface by tabbing throws away every capture in between - that's what `i` avoids. The header always shows which one you're on. Here `shift+tab` has moved from the loopback capture above to `eth0`, where the only traffic is HTTPS out to the internet:
 
 ![Live capture on eth0, interface 1 of 10, after switching with shift+tab](docs/screenshot-switch.png)
 
@@ -164,7 +166,7 @@ tcpview
 ./tcpview -remote user@host -remote-iface eth0 # start straight on eth0
 ```
 
-Without `-remote-iface`, tcpview runs `tcpdump -D` on the remote host over SSH and shows the same interface picker as local capture, listing the *remote* host's interfaces. Either way, `tab` / `shift+tab` then switches the remote capture between those interfaces live. If listing fails (e.g. an old or restricted `tcpdump`), `-remote-iface` still works, just without switching; the live view says why.
+Without `-remote-iface`, tcpview runs `tcpdump -D` on the remote host over SSH and shows the same interface picker as local capture, listing the *remote* host's interfaces. Either way, `i` (pick from the list) and `tab` / `shift+tab` (step to the neighbour) then switch the remote capture between those interfaces live. If listing fails (e.g. an old or restricted `tcpdump`), `-remote-iface` still works, just without switching; the live view says why.
 
 Every remote interface (and every switch) is its own `ssh` session, so key-based auth is strongly recommended over password prompts. An SSH `ControlMaster`/`ControlPersist` config for the host makes switching near-instant by reusing one connection.
 
@@ -182,9 +184,10 @@ The capture never includes its own SSH connection: tcpview asks the remote `tcpd
 |---|---|
 | `↑`/`↓` or `j`/`k` | move the interface-picker cursor |
 | `enter` | select an interface / apply a filter / view packet detail |
+| `i` | reopen the interface list and pick one directly (local or remote) |
 | `tab` / `shift+tab` | switch capture to the next / previous interface (local or remote) |
 | `/` | edit the filter |
-| `esc` | cancel filter editing |
+| `esc` | cancel filter editing / leave the interface list without switching |
 | `←` / `→` | rewind backward / forward in time |
 | `L` | jump back to live |
 | `e` | export the currently shown (post-filter) packets to a pcapng file |
