@@ -89,10 +89,18 @@ end_session() {
 # timestamps, so the GIF opens on the UI instead of on an empty terminal.
 # GitHub shows a GIF's first frame as its poster, so a blank lead-in is a
 # blank thumbnail.
+#
+# $2 is an optional marker: trim to shortly before the frame that first
+# contains it, instead of to the first draw. A scene whose subject only
+# appears after some setup (the help screen, say) would otherwise spend
+# most of its loop on the way there.
+# $3 is how many seconds of lead-in to keep before that marker.
 trim_cast() {
-	python3 -I - "$1" <<-'EOF'
+	python3 -I - "$1" "${2:-}" "${3:-1.2}" <<-'EOF'
 		import json, sys
 		path = sys.argv[1]
+		marker = sys.argv[2] if len(sys.argv) > 2 else ""
+		lead = float(sys.argv[3]) if len(sys.argv) > 3 else 1.2
 		lines = open(path).read().splitlines()
 		header, events = lines[0], []
 		for ln in lines[1:]:
@@ -107,6 +115,13 @@ trim_cast() {
 		    if "tcpview" in d:
 		        start = i
 		        break
+		if marker:
+		    hit = next((i for i, (t, k, d) in enumerate(events) if marker in d), None)
+		    if hit is not None:
+		        cutoff = events[hit][0] - lead
+		        start = next(
+		            (i for i, (t, k, d) in enumerate(events) if t >= cutoff), hit
+		        )
 		base = events[start][0] if events else 0
 		with open(path, "w") as fh:
 		    fh.write(header + "\n")
@@ -115,10 +130,19 @@ trim_cast() {
 	EOF
 }
 
+# render turns a scene's cast into its GIF. $2/$3 are trim_cast's marker
+# and lead-in; $4 is agg's idle-time-limit.
+#
+# That limit matters more than it looks. agg squeezes any gap between
+# terminal writes down to it, and a screen that just sits there - the
+# help reference, a rewound view - writes nothing at all while it is up.
+# At the 1.5s default a nine-second hold renders as 1.5s, so a scene
+# whose subject is a static screen has to raise it or the hold is
+# silently discarded.
 render() {
 	name=$1
-	trim_cast "$OUTDIR/$name.cast"
-	"$AGG" --font-size "$FONT_SIZE" --idle-time-limit 1.5 \
+	trim_cast "$OUTDIR/$name.cast" "${2:-}" "${3:-1.2}"
+	"$AGG" --font-size "$FONT_SIZE" --idle-time-limit "${4:-1.5}" \
 		"$OUTDIR/$name.cast" "$OUTDIR/$name.gif"
 	# The asciicast is plain text - keeping it makes a recording
 	# auditable (what actually went on screen) and re-renderable at a
@@ -218,12 +242,15 @@ scene_detail() {
 
 scene_help() {
 	start_session "$OUTDIR/demo-help.cast"
-	select_iface 0
-	sleep 3
-	key ? 5
+	# This clip documents the keybindings, not the route to them. Select
+	# straight away, open the reference, and hold it long enough to read -
+	# then trim the clip to just before it appears, so the loop is mostly
+	# the thing people came to look at.
+	key Enter 1.5
+	key ? 9
 	key Escape 1.5
 	end_session
-	render demo-help
+	render demo-help "tcpview - keybindings" 1.0 7.0
 }
 
 mkdir -p "$OUTDIR"
