@@ -77,7 +77,7 @@ func WritePcapNG(path string, pkts []store.Packet) (res Result, err error) {
 		keys = []ifaceKey{{name: "tcpview", linkType: fallbackLinkType}}
 	}
 
-	f, err := os.Create(path)
+	f, err := os.Create(path) //nolint:gosec // G304: the user chooses where to export; writing there is the point
 	if err != nil {
 		return Result{}, fmt.Errorf("export: create %s: %w", path, err)
 	}

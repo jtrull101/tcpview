@@ -46,7 +46,7 @@ func loadConfig(path string) (Config, error) {
 	if path == "" {
 		return Config{}, nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the user names their own config file; reading it is the point
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Config{}, nil

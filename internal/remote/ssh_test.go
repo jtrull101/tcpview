@@ -151,6 +151,33 @@ func TestSSH_MissingHostErrors(t *testing.T) {
 	}
 }
 
+// optionLikeHosts would be parsed by ssh as options, not as a destination:
+// -oProxyCommand=... runs an arbitrary local command.
+var optionLikeHosts = []struct{ name, host string }{
+	{"proxy command option", "-oProxyCommand=touch pwned"},
+	{"bare dash", "-"},
+	{"verbose flag", "-v"},
+	{"user prefix is still an option", "-lroot"},
+}
+
+func TestSSH_OptionLikeHostIsRejected(t *testing.T) {
+	t.Parallel()
+	for _, tc := range optionLikeHosts {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// A nonexistent ssh binary keeps a regression from launching anything real.
+			s, err := New(Options{Host: tc.host, Iface: "eth0", SSHBinary: "tcpview-test-no-such-ssh"})
+			if err == nil {
+				_ = s.Close()
+				t.Fatalf("New() accepted host %q, which ssh would parse as an option", tc.host)
+			}
+			if !strings.Contains(err.Error(), "must not start with") {
+				t.Fatalf("New() error = %q, want it to say the host must not start with '-'", err)
+			}
+		})
+	}
+}
+
 func TestSSH_MissingIfaceErrors(t *testing.T) {
 	t.Parallel()
 	_, err := New(Options{Host: "fake-host"})

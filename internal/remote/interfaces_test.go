@@ -105,6 +105,19 @@ func TestListInterfaces_MissingHostErrors(t *testing.T) {
 	}
 }
 
+func TestListInterfaces_OptionLikeHostIsRejected(t *testing.T) {
+	t.Parallel()
+	for _, tc := range optionLikeHosts {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ListInterfaces(Options{Host: tc.host, SSHBinary: "tcpview-test-no-such-ssh"})
+			if err == nil || !strings.Contains(err.Error(), "must not start with") {
+				t.Fatalf("ListInterfaces(%q) error = %v, want the host must not start with '-'", tc.host, err)
+			}
+		})
+	}
+}
+
 func TestListInterfaces_CommandFailureIncludesRemoteStderr(t *testing.T) {
 	t.Parallel()
 	_, err := ListInterfaces(Options{Host: "h", cmdFactory: listFactory(t, "", "bash: tcpdump: command not found", 127)})
