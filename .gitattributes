@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings in the working tree. A checkout with
+# core.autocrlf=true (the Git for Windows default, inherited by WSL clones)
+# otherwise writes install.sh out with CRLF, and /bin/sh -> dash then fails
+# on it with "Syntax error: word unexpected" before it does anything.
+*.sh text eol=lf

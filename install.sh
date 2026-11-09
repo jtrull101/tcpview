@@ -112,18 +112,66 @@ case ":$PATH:" in
 *) echo "tcpview: note - ${INSTALL_DIR} is not on your PATH" ;;
 esac
 
-if [ "$OS" = "linux" ]; then
-	if ldd "${INSTALL_DIR}/tcpview" 2>&1 | grep -q 'libpcap\.so\.0\.8 => not found'; then
-		LIBPCAP1="$(find /usr/lib /usr/lib64 /lib /lib64 -name 'libpcap.so.1' 2>/dev/null | head -1)"
-		echo "" >&2
-		echo "tcpview: your system has libpcap.so.1 but this (older) release needs the" >&2
-		echo "  legacy libpcap.so.0.8 soname (a quirk of the Ubuntu runner it was built on;" >&2
-		echo "  newer releases link libpcap statically and don't have this problem)." >&2
-		if [ -n "$LIBPCAP1" ]; then
-			echo "  Fix: sudo ln -s ${LIBPCAP1} $(dirname "$LIBPCAP1")/libpcap.so.0.8" >&2
+# Linux binaries up to v0.1.1 link the build runner's shared libpcap, so they
+# need libpcap's legacy .so.0.8 soname at runtime: they won't start on a system
+# carrying only the current .so.1 (Arch, Fedora) or no libpcap at all. Releases
+# after v0.1.1 link it statically and CI fails the build if they don't (see
+# .github/workflows/release.yml), so this only fires on the older ones.
+#
+# Printing a command rather than offering to run it is deliberate: the usual
+# invocation is "curl ... | sh", where stdin is the script itself, so there is
+# no tty left to read a yes/no from.
+if [ "$OS" = "linux" ] && ldd "${INSTALL_DIR}/tcpview" 2>&1 | grep -q 'libpcap\.so\.0\.8 => not found'; then
+	# Look before asserting anything about the system. The previous version of
+	# this message announced that libpcap.so.1 was present even when the search
+	# came up empty, which described the wrong problem and attached no fix.
+	SO1="$(find /usr/lib /usr/lib64 /lib /lib64 -name 'libpcap.so.1' 2>/dev/null | head -1)"
+
+	# Debian/Ubuntu's libpcap package ships the .so.0.8 name itself, so
+	# installing it is a complete fix there. Other distros package only .so.1
+	# and still need the legacy name linked alongside it afterwards.
+	PKG=""
+	PKG_HAS_SO08=""
+	if command -v apt-get >/dev/null 2>&1; then
+		# Renamed for the 64-bit time_t transition in Ubuntu 24.04 / Debian 13;
+		# old and new names both provide libpcap.so.0.8.
+		if apt-cache show libpcap0.8t64 >/dev/null 2>&1; then
+			PKG="sudo apt install libpcap0.8t64"
+		else
+			PKG="sudo apt install libpcap0.8"
 		fi
-		echo "  Or build from source instead: go build -o tcpview ." >&2
+		PKG_HAS_SO08=yes
+	elif command -v dnf >/dev/null 2>&1; then
+		PKG="sudo dnf install libpcap"
+	elif command -v yum >/dev/null 2>&1; then
+		PKG="sudo yum install libpcap"
+	elif command -v pacman >/dev/null 2>&1; then
+		PKG="sudo pacman -S libpcap"
+	elif command -v zypper >/dev/null 2>&1; then
+		PKG="sudo zypper install libpcap1"
+	elif command -v apk >/dev/null 2>&1; then
+		PKG="sudo apk add libpcap"
 	fi
+
+	echo "" >&2
+	echo "tcpview: ${VERSION} needs libpcap's legacy libpcap.so.0.8 soname, which this" >&2
+	echo "  system doesn't provide, so it won't start yet. Any one of these fixes it:" >&2
+	if [ -n "$SO1" ]; then
+		echo "  - link the libpcap you already have under the name it asks for:" >&2
+		echo "      sudo ln -s ${SO1} $(dirname "$SO1")/libpcap.so.0.8" >&2
+	elif [ -n "$PKG_HAS_SO08" ]; then
+		echo "  - install libpcap, which provides libpcap.so.0.8 directly:" >&2
+		echo "      ${PKG}" >&2
+	elif [ -n "$PKG" ]; then
+		echo "  - install libpcap, then re-run this script: it will print the exact" >&2
+		echo "    symlink command for wherever your distro put it." >&2
+		echo "      ${PKG}" >&2
+	else
+		echo "  - install your distro's libpcap package, then re-run this script: it" >&2
+		echo "    will print the exact symlink command for where it landed." >&2
+	fi
+	echo "  - or build from source, which links against whatever libpcap you have:" >&2
+	echo "      git clone https://github.com/${REPO} && cd tcpview && go build -o tcpview ." >&2
 fi
 
 # sudo only finds commands on its secure_path; warn when a custom
