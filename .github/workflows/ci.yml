@@ -94,7 +94,7 @@ jobs:
     # The release builds darwin binaries too; without this, a Mac-only
     # failure would first surface when a release tag is pushed.
     name: test (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
