@@ -83,6 +83,10 @@ lint: ## Run golangci-lint (must be installed: https://golangci-lint.run)
 .PHONY: check
 check: fmt-check vet lint test-race cover-check ## Run everything CI runs (fmt, vet, lint, race tests, coverage gate)
 
+.PHONY: record-demos
+record-demos: ## Re-record the README demo GIFs (needs tmux, asciinema, agg, and a capability-granted ./tcpview-demo)
+	@sh scripts/record-demos.sh $(SCENES)
+
 .PHONY: tidy
 tidy: ## Tidy go.mod/go.sum
 	go mod tidy

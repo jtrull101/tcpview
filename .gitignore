@@ -1,3 +1,6 @@
 /tcpview
 *.pcap
 coverage.out
+/tcpview-demo
+*.cast
+coverage.html
