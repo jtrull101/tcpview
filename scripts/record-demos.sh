@@ -130,10 +130,19 @@ trim_cast() {
 	EOF
 }
 
+# render turns a scene's cast into its GIF. $2/$3 are trim_cast's marker
+# and lead-in; $4 is agg's idle-time-limit.
+#
+# That limit matters more than it looks. agg squeezes any gap between
+# terminal writes down to it, and a screen that just sits there - the
+# help reference, a rewound view - writes nothing at all while it is up.
+# At the 1.5s default a nine-second hold renders as 1.5s, so a scene
+# whose subject is a static screen has to raise it or the hold is
+# silently discarded.
 render() {
 	name=$1
 	trim_cast "$OUTDIR/$name.cast" "${2:-}" "${3:-1.2}"
-	"$AGG" --font-size "$FONT_SIZE" --idle-time-limit 1.5 \
+	"$AGG" --font-size "$FONT_SIZE" --idle-time-limit "${4:-1.5}" \
 		"$OUTDIR/$name.cast" "$OUTDIR/$name.gif"
 	# The asciicast is plain text - keeping it makes a recording
 	# auditable (what actually went on screen) and re-renderable at a
@@ -241,7 +250,7 @@ scene_help() {
 	key ? 9
 	key Escape 1.5
 	end_session
-	render demo-help "tcpview - keybindings" 1.0
+	render demo-help "tcpview - keybindings" 1.0 7.0
 }
 
 mkdir -p "$OUTDIR"
