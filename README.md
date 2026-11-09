@@ -25,7 +25,7 @@ A terminal UI network traffic analyzer. No more remembering interface names, por
   - [CI / releases](#ci--releases)
 - [License](#license)
 
-![tcpview live-tailing loopback traffic on lo (3 of 10 interfaces), filtered to proto=icmp](docs/screenshot.png)
+![tcpview live-tailing TCP traffic on eth0, interface 1 of 14](docs/demo.gif)
 
 ## Features
 
@@ -45,15 +45,15 @@ Everything below is a real screenshot of real traffic captured on an actual mach
 
 Launching with no arguments lists every capturable interface by name and description - including the real-but-easy-to-forget ones like `any` (capture on everything at once) alongside physical NICs, bridges, and `nflog`/`nfqueue`. Pick one with `↑`/`↓` + `enter`; no prior knowledge of interface names needed.
 
-![Interface picker listing real local interfaces](docs/screenshot-picker.png)
+![Moving through the interface picker and selecting eth0, which starts live capture](docs/demo-picker.gif)
 
 ### Flip through interfaces without restarting
 
 That first pick isn't final. Press `i` to bring the interface list back up with the cursor on whatever you're capturing now, and `enter` to move capture straight there - handy when the box has ten interfaces and the one you want isn't adjacent. `esc` leaves the list without disturbing the running capture, and re-picking the current interface is a no-op rather than a restart.
 
-For stepping between neighbours there's still `tab` / `shift+tab`, which moves capture to the next / previous interface in the same list, wrapping at either end. Bear in mind each step is a real switch: it closes the current capture and empties the view, so reaching a distant interface by tabbing throws away every capture in between - that's what `i` avoids. The header always shows which one you're on. Here `shift+tab` has moved from the loopback capture above to `eth0`, where the only traffic is HTTPS out to the internet:
+![Pressing i on a live eth0 capture, jumping six interfaces down the list to lo, then reopening the list and leaving it with esc](docs/demo-switch.gif)
 
-![Live capture on eth0, interface 1 of 10, after switching with shift+tab](docs/screenshot-switch.png)
+For stepping between neighbours there's still `tab` / `shift+tab`, which moves capture to the next / previous interface in the same list, wrapping at either end. Bear in mind each step is a real switch: it closes the current capture and empties the view, so reaching a distant interface by tabbing throws away every capture in between - that's what `i` avoids. The header always shows which one you're on.
 
 Each switch starts the view fresh for the new interface and keeps your active filter; with the on-disk archive enabled, the previous interface's buffered packets are archived rather than dropped, so rewind can still reach them (filter on `iface=` to tell them apart).
 
@@ -69,31 +69,27 @@ From there it's the same UI, including `tab` / `shift+tab` to switch the remote 
 
 ### Filtering is live, not a restart
 
-Press `/` and type an expression - `iface`, `src`, `dst`, `sport`, `dport`, `proto` - while packets keep flowing in the background underneath it:
+Press `/` and type an expression - `iface`, `src`, `dst`, `sport`, `dport`, `proto` - while packets keep flowing in the background underneath it. Hit `enter` and the view narrows instantly against the *existing* buffer - no re-capture, no dropped history. Here a noisy capture is narrowed to just the outbound HTTPS traffic, `proto=tcp dport=443`:
 
-![Typing a filter expression while traffic keeps streaming](docs/screenshot-filter-edit.png)
-
-Hit `enter` and the view narrows instantly against the *existing* buffer - no re-capture, no dropped history. Here it's narrowed a noisy multi-protocol capture down to just the outbound HTTPS traffic, `dport=443 proto=tcp`:
-
-![1000 buffered packets narrowed down to 358 outbound HTTPS packets on dport=443](docs/screenshot-filter-applied.png)
+![Typing proto=tcp dport=443 while traffic streams, then the buffer narrowing to only matching packets](docs/demo-filter.gif)
 
 ### Rewind: the actually novel part
 
 This is the feature a plain `tcpdump`/Wireshark live-capture session can't give you: scrub backward in time with `←`/`→` to see traffic that already scrolled off-screen, without having had to pre-emptively start a recording. Recent history comes from an in-memory ring; anything older is transparently pulled from a bounded on-disk archive that rotates and prunes itself (see [Rewind archive flags](#rewind-archive-flags) below) - the UI doesn't care which, it just shows you what was happening at that point in time, filters and all:
 
-![REWOUND to a point in the past, showing 1468 real historical packets from the ring and the archive](docs/screenshot-rewind.png)
+![Scrubbing backward with the left arrow into buffered history, then jumping back to live with L](docs/demo-rewind.gif)
 
 ### Packet detail, down to the bytes
 
 `enter` on any row in the live or rewound view opens a full breakdown plus a classic hex+ASCII dump of the actual captured frame - no separate tool needed to go one level deeper than the summary table:
 
-![Packet detail view with a real hex dump of a captured TCP/TLS frame](docs/screenshot-detail.png)
+![Opening a captured frame to its full breakdown and hex+ASCII dump, then returning to the table](docs/demo-detail.gif)
 
 ### Full keybinding reference, always one keypress away
 
 `?` from anywhere in the live view:
 
-![Full keybinding help screen](docs/screenshot-help.png)
+![Opening the full keybinding help with ? and closing it again](docs/demo-help.gif)
 
 ## Installing a release binary
 
@@ -228,6 +224,20 @@ make check   # fmt-check, vet, golangci-lint, race-enabled tests, coverage gates
 ```
 
 Every parser-like function (filter expressions, packet decoding, archive file parsing, remote `tcpdump -D` output, the `/proc/self/status` capability parser) also has a native Go fuzz test (`make fuzz` for a quick local smoke pass); CI runs a short fuzz pass on every push, and the project has been fuzzed for 5M+ executions locally with zero crashes found.
+
+### Demo GIFs
+
+The GIFs above are recorded from a real capture session, not mocked, by `make record-demos` (`scripts/record-demos.sh`). tmux supplies a fixed-size PTY, [asciinema](https://asciinema.org) records what tcpview draws into it, `tmux send-keys` plays the keystrokes, and [agg](https://github.com/asciinema/agg) renders the asciicast to a GIF. Re-record one scene with `make record-demos SCENES=switch`.
+
+It needs `tmux`, `asciinema`, `agg`, and a `./tcpview-demo` binary holding `CAP_NET_RAW`/`CAP_NET_ADMIN`:
+
+```sh
+go build -o tcpview-demo .
+sudo setcap cap_net_raw,cap_net_admin=eip ./tcpview-demo
+make record-demos
+```
+
+Two things worth knowing before re-recording. Capture runs on a real interface (`IFACE`, default `eth0`), so **whatever is on the wire during a take ends up in the GIF** - the script drives predictable HTTPS so the table is never empty, but it cannot suppress anything else the machine is doing. And `KEEP_CAST=1` keeps the `.cast` files, which are plain text: that is the practical way to audit what a recording actually captured before committing it, and to re-render at a different size without capturing again.
 
 ### CI / releases
 
