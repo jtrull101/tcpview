@@ -204,7 +204,7 @@ func TestRun_RemoteWithIfaceEnablesSwitching(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("run() = %d, want 0", code)
 		}
-		if out := (*captured).View(); !strings.Contains(out, "fake-host (eth1) [2/2, tab/shift+tab") {
+		if out := (*captured).View(); !strings.Contains(out, "fake-host (eth1) [2/2, i to choose") {
 			t.Fatalf("View() = %q, want switching positioned on eth1", out)
 		}
 	})
