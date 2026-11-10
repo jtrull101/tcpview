@@ -70,6 +70,19 @@ type Options struct {
 	cmdFactory func() *exec.Cmd
 }
 
+// validateHost rejects an empty host, and one starting with "-": ssh would
+// read that as an option rather than a destination (-oProxyCommand=... runs
+// an arbitrary local command).
+func validateHost(host string) error {
+	if host == "" {
+		return fmt.Errorf("remote: host required")
+	}
+	if strings.HasPrefix(host, "-") {
+		return fmt.Errorf("remote: host %q must not start with '-' (ssh would read it as an option)", host)
+	}
+	return nil
+}
+
 func (o Options) withDefaults() Options {
 	if o.SSHBinary == "" {
 		o.SSHBinary = "ssh"
@@ -106,7 +119,9 @@ func (o Options) buildCmd() *exec.Cmd {
 	if o.cmdFactory != nil {
 		return o.cmdFactory()
 	}
-	return exec.Command(o.SSHBinary, o.captureArgs()...)
+	// G204: argv list with no shell; Host is validated by validateHost so it cannot be read as an ssh option,
+	// and SSHBinary is the user's own configured ssh.
+	return exec.Command(o.SSHBinary, o.captureArgs()...) //nolint:gosec
 }
 
 // captureArgs is the ssh argument list for a capture: the host, then the
@@ -142,8 +157,8 @@ var _ capture.Source = (*SSH)(nil)
 // New starts capturing from opts.Host/opts.Iface in the background. Callers
 // must call Close when done.
 func New(opts Options) (*SSH, error) {
-	if opts.Host == "" {
-		return nil, fmt.Errorf("remote: host required")
+	if err := validateHost(opts.Host); err != nil {
+		return nil, err
 	}
 	if opts.Iface == "" {
 		return nil, fmt.Errorf("remote: interface required")

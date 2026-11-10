@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             goos: linux
             goarch: amd64
           - os: ubuntu-24.04-arm
@@ -27,7 +27,7 @@ jobs:
           - os: macos-15
             goos: darwin
             goarch: arm64
-          - os: windows-latest
+          - os: windows-2025
             goos: windows
             goarch: amd64
     runs-on: ${{ matrix.os }}
@@ -36,13 +36,12 @@ jobs:
         shell: bash # Git Bash on Windows, so one set of steps serves every OS
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26"
-          check-latest: true
+          go-version: "1.26.5"
 
       - name: Build static libpcap (Linux)
         # Linking the runner's shared libpcap tied the binary to Ubuntu's
@@ -92,7 +91,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tcpview-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -103,13 +102,13 @@ jobs:
   release:
     name: publish release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true

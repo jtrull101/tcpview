@@ -2,6 +2,9 @@ version: "2"
 
 linters:
   default: standard
+  enable:
+    # SAST: Go security checks (hardcoded credentials, unsafe exec, weak crypto, file permissions, ...).
+    - gosec
   settings:
     errcheck:
       exclude-functions:
@@ -17,3 +20,9 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
+      # Tests build fixtures in t.TempDir(), so loose file modes (G301/G302/G306) and chmod games are fine;
+      # their RNGs are seeded on purpose for reproducibility (G404); and they re-exec the test binary and
+      # shell scripts as fake remotes (G204, G304). None of it touches untrusted input.
+      - path: _test\.go
+        linters:
+          - gosec

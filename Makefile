@@ -2,6 +2,9 @@ BINARY     := tcpview
 VERSION    := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS    := -s -w -X main.version=$(VERSION)
 FUZZTIME   := 10s
+# Pinned exact; run through `go run`, so they never enter go.mod. Bump deliberately.
+GOVULNCHECK_VERSION := v1.9.0
+GITLEAKS_VERSION    := v8.30.1
 
 .PHONY: all
 all: build ## Build the tcpview binary (default target)
@@ -80,8 +83,13 @@ vet: ## Run go vet
 lint: ## Run golangci-lint (must be installed: https://golangci-lint.run)
 	golangci-lint run ./...
 
+.PHONY: security
+security: ## Scan dependencies for known vulnerabilities (govulncheck) and the tree for secrets (gitleaks); gosec runs in `make lint`
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+	go run github.com/zricethezav/gitleaks/v8@$(GITLEAKS_VERSION) dir . --no-banner --redact
+
 .PHONY: check
-check: fmt-check vet lint test-race cover-check ## Run everything CI runs (fmt, vet, lint, race tests, coverage gate)
+check: fmt-check vet lint security test-race cover-check ## Run everything CI runs (fmt, vet, lint+gosec, security scans, race tests, coverage gate)
 
 .PHONY: record-demos
 record-demos: ## Re-record the README demo GIFs (needs tmux, asciinema, agg, and a capability-granted ./tcpview-demo)
