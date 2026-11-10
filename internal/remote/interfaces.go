@@ -17,7 +17,9 @@ func (o Options) buildListCmd() *exec.Cmd {
 	if o.cmdFactory != nil {
 		return o.cmdFactory()
 	}
-	return exec.Command(o.SSHBinary, o.Host, o.TcpdumpPath, "-D")
+	// G204: argv list with no shell; Host is validated by validateHost so it cannot be read as an ssh option,
+	// and SSHBinary is the user's own configured ssh.
+	return exec.Command(o.SSHBinary, o.Host, o.TcpdumpPath, "-D") //nolint:gosec
 }
 
 // ListInterfaces enumerates the capturable interfaces on opts.Host by
@@ -25,8 +27,8 @@ func (o Options) buildListCmd() *exec.Cmd {
 // tcpdump" requirement as capture itself, no agent needed. opts.Iface is
 // ignored.
 func ListInterfaces(opts Options) ([]capture.Interface, error) {
-	if opts.Host == "" {
-		return nil, fmt.Errorf("remote: host required")
+	if err := validateHost(opts.Host); err != nil {
+		return nil, err
 	}
 	opts = opts.withDefaults()
 

@@ -23,3 +23,7 @@ Every non-trivial component (each package under `internal/`) needs all of the fo
 ## Archive disk cap
 
 `internal/store/archive.go`'s rotating archive writer (JSON lines, not pcap - see its doc comment) enforces a configurable maximum total size (GiB, user-configurable) for all archived capture files combined - on rotation, oldest archive files are deleted first to stay under the cap. This must never grow unbounded; it's stress- and load-tested per the policy above (fill past the cap under sustained write load, confirm total on-disk size never exceeds it).
+
+## Quality and security gates
+
+`make check` is what CI runs: gofmt, `go vet`, golangci-lint (including the `gosec` SAST linter), `make security` (govulncheck for known-vulnerable dependencies, gitleaks for committed secrets), race tests and the coverage gate. A `//nolint:gosec` needs a comment saying why the finding doesn't apply. govulncheck and gitleaks are pinned in the `Makefile` and run through `go run`, so bump them there deliberately.

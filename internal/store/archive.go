@@ -83,7 +83,7 @@ func NewArchive(opts ArchiveOptions) (*Archive, error) {
 	if opts.Dir == "" {
 		return nil, fmt.Errorf("store: archive directory required")
 	}
-	if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
+	if err := os.MkdirAll(opts.Dir, 0o750); err != nil {
 		return nil, fmt.Errorf("store: create archive dir: %w", err)
 	}
 	return &Archive{opts: opts}, nil
@@ -129,7 +129,7 @@ func (a *Archive) rotateLocked(startTime time.Time) error {
 	}
 
 	name := archivePrefix + startTime.UTC().Format(archiveTimeLayout) + archiveSuffix
-	f, err := os.OpenFile(filepath.Join(a.opts.Dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(filepath.Join(a.opts.Dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: the directory is the user's configured archive dir and name is generated here
 	if err != nil {
 		return fmt.Errorf("store: rotate archive: %w", err)
 	}
@@ -331,7 +331,7 @@ func parseArchiveFileStart(name string) (time.Time, bool) {
 // readArchiveFile decodes every line of the archive file at path,
 // skipping (and counting) lines that aren't a valid Packet.
 func readArchiveFile(path string) (pkts []Packet, skipped int, err error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: path comes from listing the archive directory, not from user input
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: open archive file %s: %w", path, err)
 	}

@@ -21,6 +21,45 @@ func archivePacket(t time.Time, summary string) Packet {
 
 // --- positive ---
 
+// Captured traffic can hold credentials and other private data, so the
+// archive directory and its files must not be readable by other users.
+func TestArchive_CreatesPrivateDirAndFiles(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits are not enforced on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "archive") // does not exist yet, so NewArchive creates it
+	a, err := NewArchive(ArchiveOptions{Dir: dir})
+	if err != nil {
+		t.Fatalf("NewArchive error: %v", err)
+	}
+	defer a.Close()
+	if err := a.Write(archivePacket(time.Now().UTC(), "x")); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o027 != 0 {
+		t.Errorf("archive dir mode %o lets group write or others access it", perm)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*"+archiveSuffix))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no archive file written (err=%v)", err)
+	}
+	for _, f := range files {
+		fi, err := os.Stat(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm&0o177 != 0 {
+			t.Errorf("archive file %s mode %o is readable or writable by others", filepath.Base(f), perm)
+		}
+	}
+}
+
 func TestArchive_WriteAndReadBackRoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
